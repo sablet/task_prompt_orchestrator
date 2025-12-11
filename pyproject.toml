@@ -1,0 +1,77 @@
+[project]
+name = "task-prompt-orchestrator"
+version = "0.1.0"
+description = "Multi-step Claude Code task automation with validation and retry logic"
+requires-python = ">=3.10"
+dependencies = [
+    "claude-agent-sdk>=0.1.0",
+    "anyio>=4.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+task-orchestrator = "task_prompt_orchestrator.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/task_prompt_orchestrator"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "ANN", "B", "S", "C90", "PLR", "RET", "SIM", "UP"]
+ignore = [
+    "S101", "B008", "ANN204", "B017", "ANN201", "E501",
+    "ANN001",   # 引数型注釈 - 実験コードでは過剰
+    "ANN003",   # **kwargs型注釈 - 実用的でない
+    "ANN202",   # private関数戻り値型 - 内部実装詳細
+    "ANN401",   # Any型禁止 - scikit-learn等の型が複雑
+    "PLR0913",  # 引数多すぎ - 実験で設定項目が多いのは自然
+    "PLR0914",  # ローカル変数多すぎ - 同上
+    "PLR0917",  # 位置引数多すぎ - 同上
+    "PLR2004",  # マジックナンバー - 実験では定数化の価値低い
+]
+
+preview = true
+
+[tool.ruff.lint.flake8-type-checking]
+exempt-modules = []
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**/*.py" = ["ALL"]
+"main.py" = ["PLR6301"]  # Fire CLI requires instance methods
+"model/**/*.py" = ["ALL"]  # External model code
+
+[tool.ruff.lint.mccabe]
+max-complexity = 12
+
+[tool.ruff.lint.pylint]
+max-branches = 12
+max-statements = 50
+max-returns = 6
+max-nested-blocks = 4
+
+[tool.pylint.main]
+disable = "all"
+enable = "too-many-lines"
+
+[tool.pylint.format]
+max-module-lines = 1000
+
+[tool.mypy]
+ignore_missing_imports = true
+disallow_any_generics = true  # list/dict等に型パラメータ必須
+disable_error_code = ["import-untyped"]  # yaml等のスタブ未インストールを無視
+
+[tool.deptry]
+extend_exclude = ["apps", "output", "frontend"]
+ignore_notebooks = true
+
+[dependency-groups]
+dev = [
+    "pylint>=4.0.4",
+    "xenon>=0.9.3",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.21.0",
+]

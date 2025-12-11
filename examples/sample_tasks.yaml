@@ -1,0 +1,42 @@
+# Sample Task Definition for Task Prompt Orchestrator
+# This file demonstrates the YAML format for defining multi-step tasks
+
+tasks:
+  - id: task_1
+    name: Create Hello World Module
+    instruction: |
+      Create a Python file `output/hello.py` with the following:
+      1. A function `hello(name: str = "World") -> str` that returns "Hello, {name}!"
+      2. A `if __name__ == "__main__"` block that prints hello()
+    validation:
+      - "`output/hello.py` file exists"
+      - "Function `hello()` is defined with default parameter"
+      - "Running `python output/hello.py` outputs 'Hello, World!'"
+      - "Code passes basic lint check"
+
+  - id: task_2
+    name: Add Greeting Variations
+    depends_on: [task_1]
+    instruction: |
+      Extend `output/hello.py` with:
+      1. A function `goodbye(name: str = "World") -> str` that returns "Goodbye, {name}!"
+      2. A function `greet(name: str, greeting: str = "Hello") -> str` that returns "{greeting}, {name}!"
+    validation:
+      - "Function `goodbye()` is defined in `output/hello.py`"
+      - "Function `greet()` is defined in `output/hello.py`"
+      - "`greet('Alice', 'Hi')` returns 'Hi, Alice!'"
+      - "All existing functionality still works"
+
+  - id: task_3
+    name: Add Unit Tests
+    depends_on: [task_2]
+    instruction: |
+      Create a test file `output/test_hello.py` with:
+      1. Import pytest
+      2. Test cases for `hello()`, `goodbye()`, and `greet()` functions
+      3. At least 3 test cases per function
+    validation:
+      - "`output/test_hello.py` file exists"
+      - "Uses pytest for testing"
+      - "Running `pytest output/test_hello.py -v` shows all tests passing"
+      - "At least 9 test cases total"

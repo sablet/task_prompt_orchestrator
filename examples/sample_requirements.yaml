@@ -1,0 +1,31 @@
+# Sample requirements definition for Loop B orchestrator
+# Format is similar to tasks.yaml
+#
+# 詳細な要件定義はMarkdownで記述し、acceptance_criteria内でパスを参照可能:
+#   - "doc/design/feature-spec.md に記載の仕様を満たす"
+#
+# Claude Code が自動的にファイルを読み込んで検証する
+
+requirements:
+  - id: req_aggregation
+    name: 売上データの集計機能
+    acceptance_criteria:
+      - "aggregate_by_category(data) が商品カテゴリ別の売上合計を返す"
+      - "aggregate_by_month(data) が月別の売上合計を返す"
+      - "戻り値は dict[str, float] 形式"
+
+  - id: req_report_output
+    name: Markdownレポートの生成
+    acceptance_criteria:
+      - "generate_report() がmarkdown形式の文字列を返す"
+      - "レポートにカテゴリ別売上テーブルが含まれる"
+      - "レポートに月別売上テーブルが含まれる"
+      - "合計金額が表示される"
+
+  - id: req_cli
+    name: CLIからの実行
+    acceptance_criteria:
+      - "python -m sales report input.csv で実行できる"
+      - "--output オプションで出力先を指定できる"
+      - "指定がない場合は標準出力に表示"
+      - "既存の load_sales_data() を変更しない"
