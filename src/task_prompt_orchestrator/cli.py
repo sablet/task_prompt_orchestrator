@@ -628,8 +628,18 @@ async def run_loopc(args: argparse.Namespace) -> int:
 # =============================================================================
 
 
+class InvalidYamlFormatError(Exception):
+    """Raised when YAML file format is neither Loop B nor Loop C."""
+
+    pass
+
+
 def _detect_loop_type(args: argparse.Namespace) -> bool:
-    """Detect if this should run as Loop B. Returns True for Loop B."""
+    """Detect if this should run as Loop B. Returns True for Loop B.
+
+    Raises:
+        InvalidYamlFormatError: If YAML format is neither Loop B nor Loop C.
+    """
     if args.loopb:
         return True
 
@@ -645,8 +655,10 @@ def _detect_loop_type(args: argparse.Namespace) -> bool:
         logger.info("Detected task file (Loop C mode)")
         return False
 
-    logger.warning("Could not detect YAML type, defaulting to Loop C")
-    return False
+    raise InvalidYamlFormatError(
+        f"Invalid YAML format: {yaml_path}. "
+        "Expected 'tasks' key (Loop C) or 'requirements' key (Loop B)."
+    )
 
 
 async def run_command(args: argparse.Namespace) -> int:
@@ -654,7 +666,11 @@ async def run_command(args: argparse.Namespace) -> int:
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    is_loopb = _detect_loop_type(args)
+    try:
+        is_loopb = _detect_loop_type(args)
+    except InvalidYamlFormatError as e:
+        logger.error(str(e))
+        return 1
 
     if is_loopb:
         from .cli_loopb import print_loopb_dry_run

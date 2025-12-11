@@ -19,6 +19,8 @@ from task_prompt_orchestrator.schema import (
     RequirementDefinition,
     TaskResult,
     TaskStatus,
+    YamlType,
+    detect_yaml_type,
 )
 
 
@@ -84,9 +86,19 @@ class TestLoopBHistoryManager:
             manager = LoopBHistoryManager(temp_dir)
             config = RequirementsOrchestratorConfig(max_iterations=3)
 
+            # Create actual files
+            req1_path = Path(temp_dir) / "req1.yaml"
+            req2_path = Path(temp_dir) / "req2.yaml"
+            req1_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: []\n"
+            )
+            req2_path.write_text(
+                "requirements:\n  - id: req_2\n    name: Test\n    acceptance_criteria: []\n"
+            )
+
             # Create
-            h1 = manager.create_history("/path/req1.yaml", config)
-            h2 = manager.create_history("/path/req2.yaml", config)
+            h1 = manager.create_history(str(req1_path), config)
+            h2 = manager.create_history(str(req2_path), config)
             assert h1.status == LoopBStatus.GENERATING_TASKS
             assert h1.max_iterations == 3
 
@@ -113,7 +125,9 @@ class TestRequirementsOrchestrator:
     """Tests for RequirementsOrchestrator - Loop B orchestration."""
 
     @pytest.mark.asyncio
-    async def test_iteration_scenarios(self, sample_requirements: RequirementDefinition) -> None:
+    async def test_iteration_scenarios(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
         """Test single iteration success, multiple iterations, and max iterations failure."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Scenario 1: Single iteration success
@@ -131,8 +145,10 @@ class TestRequirementsOrchestrator:
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             with self._mock_claude_and_loopc(
                 [
-                    make_task_response("t1"), make_verify_response(False, ["req_2"]),
-                    make_task_response("t2"), make_verify_response(True),
+                    make_task_response("t1"),
+                    make_verify_response(False, ["req_2"]),
+                    make_task_response("t2"),
+                    make_verify_response(True),
                 ],
                 [make_mock_result(["t1"]), make_mock_result(["t2"])],
             ):
@@ -142,11 +158,15 @@ class TestRequirementsOrchestrator:
             assert set(result.completed_task_ids) == {"t1", "t2"}
 
             # Scenario 3: Max iterations reached
-            orchestrator = self._create_orchestrator(sample_requirements, temp_dir, max_iter=2)
+            orchestrator = self._create_orchestrator(
+                sample_requirements, temp_dir, max_iter=2
+            )
             with self._mock_claude_and_loopc(
                 [
-                    make_task_response(), make_verify_response(False, ["req_2"]),
-                    make_task_response(), make_verify_response(False, ["req_2"]),
+                    make_task_response(),
+                    make_verify_response(False, ["req_2"]),
+                    make_task_response(),
+                    make_verify_response(False, ["req_2"]),
                 ],
                 [make_mock_result(["x"]), make_mock_result(["y"])],
             ):
@@ -155,7 +175,9 @@ class TestRequirementsOrchestrator:
             assert "Max iterations" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_task_generation_failure(self, sample_requirements: RequirementDefinition) -> None:
+    async def test_task_generation_failure(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
         """Test failure when task generation returns no tasks."""
         with tempfile.TemporaryDirectory() as temp_dir:
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
@@ -169,7 +191,9 @@ class TestRequirementsOrchestrator:
             assert "Failed to generate tasks" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_in_memory_execution(self, sample_requirements: RequirementDefinition) -> None:
+    async def test_in_memory_execution(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
         """Test execution without history manager."""
         config = RequirementsOrchestratorConfig(
             max_iterations=1,
@@ -177,7 +201,10 @@ class TestRequirementsOrchestrator:
             orchestrator_config=OrchestratorConfig(stream_output=False),
         )
         orchestrator = RequirementsOrchestrator(
-            requirements=sample_requirements, config=config, history_manager=None, requirements_path=""
+            requirements=sample_requirements,
+            config=config,
+            history_manager=None,
+            requirements_path="",
         )
         with self._mock_claude_and_loopc(
             [make_task_response(), make_verify_response(True)],
@@ -188,12 +215,16 @@ class TestRequirementsOrchestrator:
         assert result.history_id.startswith("inmemory_")
 
     @pytest.mark.asyncio
-    async def test_loop_c_failure_scenarios(self, sample_requirements: RequirementDefinition) -> None:
+    async def test_loop_c_failure_scenarios(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
         """Test Loop B behavior when Loop C fails or has partial failures."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Scenario 1: Loop C returns success=False (max retries reached)
             # Use max_iter=1 to simplify
-            orchestrator = self._create_orchestrator(sample_requirements, temp_dir, max_iter=1)
+            orchestrator = self._create_orchestrator(
+                sample_requirements, temp_dir, max_iter=1
+            )
             with self._mock_claude_and_loopc(
                 [make_task_response(), make_verify_response(False, ["req_1", "req_2"])],
                 [make_mock_result(["task_1"], success=False, failed_ids=["task_1"])],
@@ -206,7 +237,9 @@ class TestRequirementsOrchestrator:
             assert result.status == LoopBStatus.FAILED
 
             # Scenario 2: Loop C raises exception - should propagate
-            orchestrator = self._create_orchestrator(sample_requirements, temp_dir, max_iter=1)
+            orchestrator = self._create_orchestrator(
+                sample_requirements, temp_dir, max_iter=1
+            )
             with patch(
                 "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
                 new_callable=AsyncMock,
@@ -221,7 +254,9 @@ class TestRequirementsOrchestrator:
                         await orchestrator.run()
 
             # Scenario 3: Partial success - some tasks approved, some failed
-            orchestrator = self._create_orchestrator(sample_requirements, temp_dir, max_iter=1)
+            orchestrator = self._create_orchestrator(
+                sample_requirements, temp_dir, max_iter=1
+            )
             with self._mock_claude_and_loopc(
                 [make_task_response("t1"), make_verify_response(False, ["req_2"])],
                 [make_mock_result(["t1", "t2"], success=False, failed_ids=["t2"])],
@@ -235,6 +270,11 @@ class TestRequirementsOrchestrator:
         self, requirements: RequirementDefinition, temp_dir: str, max_iter: int = 3
     ) -> RequirementsOrchestrator:
         """Helper to create orchestrator with standard config."""
+        # Create actual requirements file
+        req_path = Path(temp_dir) / "req.yaml"
+        req_path.write_text(
+            "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n  - id: req_2\n    name: Test2\n    acceptance_criteria: [Done]\n"
+        )
         return RequirementsOrchestrator(
             requirements=requirements,
             config=RequirementsOrchestratorConfig(
@@ -243,11 +283,13 @@ class TestRequirementsOrchestrator:
                 orchestrator_config=OrchestratorConfig(stream_output=False),
             ),
             history_manager=LoopBHistoryManager(temp_dir),
-            requirements_path="/path/to/req.yaml",
+            requirements_path=str(req_path),
         )
 
     @staticmethod
-    def _mock_claude_and_loopc(claude_responses: list[str], loopc_results: list[OrchestratorResult]):
+    def _mock_claude_and_loopc(
+        claude_responses: list[str], loopc_results: list[OrchestratorResult]
+    ):
         """Context manager to mock both run_claude_query and run_orchestrator."""
         claude_mock = patch(
             "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
@@ -271,3 +313,389 @@ class TestRequirementsOrchestrator:
                 claude_mock.__exit__(*args)
 
         return CombinedContext()
+
+
+class TestYamlFormatValidation:
+    """Test Case A: Invalid YAML format detection and error exit."""
+
+    def test_detect_yaml_type_loopb(self) -> None:
+        """Loop B (requirements) YAML is correctly detected."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: []\n"
+            )
+            f.flush()
+            assert detect_yaml_type(f.name) == YamlType.LOOP_B
+
+    def test_detect_yaml_type_loopc(self) -> None:
+        """Loop C (tasks) YAML is correctly detected."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(
+                "tasks:\n  - id: task_1\n    name: Test\n    instruction: Do\n    validation: []\n"
+            )
+            f.flush()
+            assert detect_yaml_type(f.name) == YamlType.LOOP_C
+
+    def test_detect_yaml_type_unknown(self) -> None:
+        """Invalid YAML format (neither Loop B nor Loop C) returns UNKNOWN."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("invalid:\n  key: value\n")
+            f.flush()
+            assert detect_yaml_type(f.name) == YamlType.UNKNOWN
+
+    def test_detect_yaml_type_empty(self) -> None:
+        """Empty YAML file returns UNKNOWN."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("")
+            f.flush()
+            assert detect_yaml_type(f.name) == YamlType.UNKNOWN
+
+
+class TestCLIInvalidYamlFormat:
+    """Test Case A: CLI behavior with invalid YAML format."""
+
+    def test_invalid_yaml_format_error(self) -> None:
+        """CLI returns error code 1 for invalid YAML format."""
+        from task_prompt_orchestrator.cli import (
+            InvalidYamlFormatError,
+            _detect_loop_type,
+        )
+        import argparse
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write("invalid:\n  key: value\n")
+            f.flush()
+
+            args = argparse.Namespace(input_file=f.name, loopb=False)
+            with pytest.raises(InvalidYamlFormatError) as exc_info:
+                _detect_loop_type(args)
+
+            assert "Invalid YAML format" in str(exc_info.value)
+            assert (
+                "Expected 'tasks' key (Loop C) or 'requirements' key (Loop B)"
+                in str(exc_info.value)
+            )
+
+
+class TestLoopBResumeFromInterruption:
+    """Test Case B: Resume Loop B orchestrator after interruption during Loop C."""
+
+    @pytest.mark.asyncio
+    async def test_resume_from_executing_tasks_state(self) -> None:
+        """Resume from EXECUTING_TASKS status should resume Loop C, not regenerate tasks."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LoopBHistoryManager(temp_dir)
+            requirements = RequirementDefinition(
+                requirements=[
+                    Requirement(
+                        id="req_1", name="Requirement 1", acceptance_criteria=["Done"]
+                    ),
+                ]
+            )
+
+            # Create requirements file
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            # Create tasks file (simulating that tasks were already generated)
+            tasks_dir = Path(temp_dir) / ".task-orchestrator-history/loopb/tasks"
+            tasks_dir.mkdir(parents=True, exist_ok=True)
+            tasks_yaml_path = tasks_dir / "requirements-tasks-iter1.yaml"
+            tasks_yaml_path.write_text("""tasks:
+  - id: task_1
+    name: Task 1
+    instruction: Do task 1
+    validation:
+      - criterion: "OK"
+        covers: [req_1.1]
+    depends_on: []
+""")
+
+            config = RequirementsOrchestratorConfig(
+                max_iterations=3,
+                tasks_output_dir=str(tasks_dir),
+                orchestrator_config=OrchestratorConfig(stream_output=False),
+            )
+
+            # Create history in EXECUTING_TASKS state (simulating interruption during Loop C)
+            history = manager.create_history(str(req_path), config)
+            history.status = LoopBStatus.EXECUTING_TASKS
+            history.current_iteration = 1
+            history.iterations = []  # No iteration record yet (interrupted before completion)
+            manager.save_history(history)
+
+            # Create orchestrator for resume
+            orchestrator = RequirementsOrchestrator(
+                requirements=requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Mock the LLM calls and Loop C execution
+            # Key: run_orchestrator should be called (for Loop C), but NOT run_claude_query for task generation
+            task_gen_call_count = 0
+            loop_c_call_count = 0
+
+            async def mock_claude_query(
+                prompt: str, config: OrchestratorConfig, phase: str = ""
+            ) -> str:
+                nonlocal task_gen_call_count
+                if phase == "task_generation":
+                    task_gen_call_count += 1
+                # Return verification result
+                return '{"all_requirements_met": true, "requirement_status": [{"requirement_id": "req_1", "met": true}], "feedback_for_additional_tasks": ""}'
+
+            async def mock_run_orchestrator(*args, **kwargs) -> OrchestratorResult:
+                nonlocal loop_c_call_count
+                loop_c_call_count += 1
+                return OrchestratorResult(
+                    success=True,
+                    task_results=[
+                        TaskResult(task_id="task_1", status=TaskStatus.APPROVED)
+                    ],
+                    total_attempts=1,
+                    summary="Done",
+                )
+
+            with patch(
+                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                side_effect=mock_claude_query,
+            ):
+                with patch(
+                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    new_callable=AsyncMock,
+                    side_effect=mock_run_orchestrator,
+                ):
+                    result = await orchestrator.resume(history)
+
+            # Verify: task generation should NOT have been called (tasks already exist)
+            assert (
+                task_gen_call_count == 0
+            ), f"Task generation called {task_gen_call_count} times, expected 0"
+
+            # Verify: Loop C should have been called
+            assert (
+                loop_c_call_count == 1
+            ), f"Loop C called {loop_c_call_count} times, expected 1"
+
+            # Verify: completed successfully
+            assert result.status == LoopBStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_resume_from_generating_tasks_state(self) -> None:
+        """Resume from GENERATING_TASKS status should regenerate tasks."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LoopBHistoryManager(temp_dir)
+            requirements = RequirementDefinition(
+                requirements=[
+                    Requirement(
+                        id="req_1", name="Requirement 1", acceptance_criteria=["Done"]
+                    ),
+                ]
+            )
+
+            # Create requirements file
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            tasks_dir = Path(temp_dir) / ".task-orchestrator-history/loopb/tasks"
+            tasks_dir.mkdir(parents=True, exist_ok=True)
+
+            config = RequirementsOrchestratorConfig(
+                max_iterations=3,
+                tasks_output_dir=str(tasks_dir),
+                orchestrator_config=OrchestratorConfig(stream_output=False),
+            )
+
+            # Create history in GENERATING_TASKS state (simulating interruption during task generation)
+            history = manager.create_history(str(req_path), config)
+            history.status = LoopBStatus.GENERATING_TASKS
+            history.current_iteration = 1
+            manager.save_history(history)
+
+            # Create orchestrator for resume
+            orchestrator = RequirementsOrchestrator(
+                requirements=requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Track calls
+            task_gen_call_count = 0
+            loop_c_call_count = 0
+
+            async def mock_claude_query(
+                prompt: str, config: OrchestratorConfig, phase: str = ""
+            ) -> str:
+                nonlocal task_gen_call_count
+                if phase == "task_generation":
+                    task_gen_call_count += 1
+                    return """```yaml
+tasks:
+  - id: task_1
+    name: Task 1
+    instruction: Do task 1
+    validation:
+      - criterion: "OK"
+        covers: [req_1.1]
+```"""
+                # Return verification result
+                return '{"all_requirements_met": true, "requirement_status": [{"requirement_id": "req_1", "met": true}], "feedback_for_additional_tasks": ""}'
+
+            async def mock_run_orchestrator(*args, **kwargs) -> OrchestratorResult:
+                nonlocal loop_c_call_count
+                loop_c_call_count += 1
+                return OrchestratorResult(
+                    success=True,
+                    task_results=[
+                        TaskResult(task_id="task_1", status=TaskStatus.APPROVED)
+                    ],
+                    total_attempts=1,
+                    summary="Done",
+                )
+
+            with patch(
+                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                side_effect=mock_claude_query,
+            ):
+                with patch(
+                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    new_callable=AsyncMock,
+                    side_effect=mock_run_orchestrator,
+                ):
+                    result = await orchestrator.resume(history)
+
+            # Verify: task generation SHOULD have been called
+            assert (
+                task_gen_call_count == 1
+            ), f"Task generation called {task_gen_call_count} times, expected 1"
+
+            # Verify: Loop C should have been called
+            assert (
+                loop_c_call_count == 1
+            ), f"Loop C called {loop_c_call_count} times, expected 1"
+
+            # Verify: completed successfully
+            assert result.status == LoopBStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_resume_info_for_executing_tasks(self) -> None:
+        """_get_resume_info returns correct values for EXECUTING_TASKS status."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LoopBHistoryManager(temp_dir)
+            requirements = RequirementDefinition(
+                requirements=[
+                    Requirement(id="req_1", name="Req", acceptance_criteria=["Done"])
+                ]
+            )
+
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            config = RequirementsOrchestratorConfig(max_iterations=3)
+
+            orchestrator = RequirementsOrchestrator(
+                requirements=requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Simulate history in EXECUTING_TASKS state at iteration 1
+            history = manager.create_history(str(req_path), config)
+            history.status = LoopBStatus.EXECUTING_TASKS
+            history.current_iteration = 1
+            orchestrator.history = history
+
+            resume_info = orchestrator._get_resume_info()
+
+            assert resume_info["start_iteration"] == 0  # 0-indexed for iteration 1
+            assert resume_info["skip_task_generation"] is True
+            assert resume_info["resume_loop_c"] is True
+
+    @pytest.mark.asyncio
+    async def test_resume_info_for_generating_tasks(self) -> None:
+        """_get_resume_info returns correct values for GENERATING_TASKS status."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LoopBHistoryManager(temp_dir)
+            requirements = RequirementDefinition(
+                requirements=[
+                    Requirement(id="req_1", name="Req", acceptance_criteria=["Done"])
+                ]
+            )
+
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            config = RequirementsOrchestratorConfig(max_iterations=3)
+
+            orchestrator = RequirementsOrchestrator(
+                requirements=requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Simulate history in GENERATING_TASKS state at iteration 1
+            history = manager.create_history(str(req_path), config)
+            history.status = LoopBStatus.GENERATING_TASKS
+            history.current_iteration = 1
+            orchestrator.history = history
+
+            resume_info = orchestrator._get_resume_info()
+
+            assert resume_info["start_iteration"] == 0  # 0-indexed for iteration 1
+            assert resume_info["skip_task_generation"] is False  # Should regenerate
+            assert resume_info["resume_loop_c"] is False
+
+    @pytest.mark.asyncio
+    async def test_resume_info_for_verifying_requirements(self) -> None:
+        """_get_resume_info returns correct values for VERIFYING_REQUIREMENTS status."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = LoopBHistoryManager(temp_dir)
+            requirements = RequirementDefinition(
+                requirements=[
+                    Requirement(id="req_1", name="Req", acceptance_criteria=["Done"])
+                ]
+            )
+
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            config = RequirementsOrchestratorConfig(max_iterations=3)
+
+            orchestrator = RequirementsOrchestrator(
+                requirements=requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Simulate history in VERIFYING_REQUIREMENTS state at iteration 1
+            history = manager.create_history(str(req_path), config)
+            history.status = LoopBStatus.VERIFYING_REQUIREMENTS
+            history.current_iteration = 1
+            orchestrator.history = history
+
+            resume_info = orchestrator._get_resume_info()
+
+            # VERIFYING_REQUIREMENTS means iteration 1 is done, continue to iteration 2
+            assert (
+                resume_info["start_iteration"] == 1
+            )  # Start at iteration 2 (0-indexed = 1)
+            assert resume_info["skip_task_generation"] is False
+            assert resume_info["resume_loop_c"] is False

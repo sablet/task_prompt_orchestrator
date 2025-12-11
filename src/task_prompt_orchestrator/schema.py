@@ -296,6 +296,7 @@ class Requirement:
     id: str
     name: str
     acceptance_criteria: list[str]
+    notes: str | None = None  # Optional notes for additional context
 
 
 @dataclass
@@ -315,6 +316,7 @@ class RequirementDefinition:
                 id=req["id"],
                 name=req["name"],
                 acceptance_criteria=req.get("acceptance_criteria", []),
+                notes=req.get("notes"),
             )
             for req in data.get("requirements", [])
         ]
@@ -361,6 +363,7 @@ class LoopBExecutionHistory:
     loop_c_history_ids: list[str]
     final_result: dict[str, Any] | None = None
     error: str | None = None
+    requirements_hash: str | None = None  # SHA256 hash of requirements YAML content
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
@@ -387,6 +390,7 @@ class LoopBExecutionHistory:
             "loop_c_history_ids": self.loop_c_history_ids,
             "final_result": self.final_result,
             "error": self.error,
+            "requirements_hash": self.requirements_hash,
         }
 
     @classmethod
@@ -416,6 +420,7 @@ class LoopBExecutionHistory:
             loop_c_history_ids=data.get("loop_c_history_ids", []),
             final_result=data.get("final_result"),
             error=data.get("error"),
+            requirements_hash=data.get("requirements_hash"),
         )
 
 

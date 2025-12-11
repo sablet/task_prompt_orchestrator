@@ -9,6 +9,9 @@
 requirements:
   - id: req_aggregation
     name: 売上データの集計機能
+    notes: |
+      CSVの列は date, category, amount を想定。
+      空行・不正データは無視する。
     acceptance_criteria:
       - "aggregate_by_category(data) が商品カテゴリ別の売上合計を返す"
       - "aggregate_by_month(data) が月別の売上合計を返す"
@@ -24,8 +27,15 @@ requirements:
 
   - id: req_cli
     name: CLIからの実行
+    notes: clickライブラリを使用すること
     acceptance_criteria:
-      - "python -m sales report input.csv で実行できる"
       - "--output オプションで出力先を指定できる"
       - "指定がない場合は標準出力に表示"
       - "既存の load_sales_data() を変更しない"
+
+  - id: req_env
+    name: 実行場所やデータの整備
+    acceptance_criteria:
+      - "コードはカレントディレクトリではなく、output/sales_report_test 配下に作成する"
+      - "このディレクトリに移動してから、 uv run python -m sales report input.csv で実行できる"
+      - "input.csv は10行ほどのサンプルデータを作成して動作検証ができている"

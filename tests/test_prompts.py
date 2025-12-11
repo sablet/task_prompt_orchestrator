@@ -46,7 +46,9 @@ tasks:
         assert tasks[1].depends_on == ["task_1"]
 
         # Raw YAML
-        tasks_raw = parse_generated_tasks("tasks:\n  - id: raw\n    name: Raw\n    instruction: Do\n    validation: [Done]")
+        tasks_raw = parse_generated_tasks(
+            "tasks:\n  - id: raw\n    name: Raw\n    instruction: Do\n    validation: [Done]"
+        )
         assert len(tasks_raw) == 1
         assert tasks_raw[0].id == "raw"
 
@@ -77,8 +79,14 @@ class TestParseVerificationResult:
         assert result["feedback_for_additional_tasks"] == "Need work"
 
         # Heuristic fallback
-        assert parse_verification_result("All requirements met")["all_requirements_met"] is True
-        assert parse_verification_result("Missing requirements")["all_requirements_met"] is False
+        assert (
+            parse_verification_result("All requirements met")["all_requirements_met"]
+            is True
+        )
+        assert (
+            parse_verification_result("Missing requirements")["all_requirements_met"]
+            is False
+        )
 
 
 class TestGetUnmetRequirementIds:
@@ -87,20 +95,27 @@ class TestGetUnmetRequirementIds:
     def test_extract_unmet_ids(self) -> None:
         """Test extracting unmet requirement IDs."""
         # All met
-        assert get_unmet_requirement_ids({
-            "requirement_status": [
-                {"requirement_id": "req_1", "met": True},
-                {"requirement_id": "req_2", "met": True},
-            ]
-        }) == []
+        assert (
+            get_unmet_requirement_ids(
+                {
+                    "requirement_status": [
+                        {"requirement_id": "req_1", "met": True},
+                        {"requirement_id": "req_2", "met": True},
+                    ]
+                }
+            )
+            == []
+        )
 
         # Some unmet
-        unmet = get_unmet_requirement_ids({
-            "requirement_status": [
-                {"requirement_id": "req_1", "met": True},
-                {"requirement_id": "req_2", "met": False},
-            ]
-        })
+        unmet = get_unmet_requirement_ids(
+            {
+                "requirement_status": [
+                    {"requirement_id": "req_1", "met": True},
+                    {"requirement_id": "req_2", "met": False},
+                ]
+            }
+        )
         assert unmet == ["req_2"]
 
         # Empty
@@ -114,7 +129,9 @@ class TestBuildPrompts:
         """Test initial and additional task generation prompts."""
         requirements = RequirementDefinition(
             requirements=[
-                Requirement(id="req_1", name="Test Requirement", acceptance_criteria=["Done"])
+                Requirement(
+                    id="req_1", name="Test Requirement", acceptance_criteria=["Done"]
+                )
             ],
         )
 
@@ -124,7 +141,9 @@ class TestBuildPrompts:
         assert "Test Requirement" in prompt
 
         # Additional generation
-        completed = [Task(id="task_1", name="Done", instruction="Did", validation=["OK"])]
+        completed = [
+            Task(id="task_1", name="Done", instruction="Did", validation=["OK"])
+        ]
         prompt_add = build_task_generation_prompt(
             requirements, completed_tasks=completed, previous_feedback="Need more"
         )
@@ -134,7 +153,9 @@ class TestBuildPrompts:
     def test_verification_prompt(self) -> None:
         """Test verification prompt generation."""
         requirements = RequirementDefinition(
-            requirements=[Requirement(id="req_1", name="Test Req", acceptance_criteria=["Works"])],
+            requirements=[
+                Requirement(id="req_1", name="Test Req", acceptance_criteria=["Works"])
+            ],
         )
         results = [TaskResult(task_id="task_1", status=TaskStatus.APPROVED)]
         prompt = build_requirement_verification_prompt(requirements, results)

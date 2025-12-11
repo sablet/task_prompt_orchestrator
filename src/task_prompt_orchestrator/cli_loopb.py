@@ -12,6 +12,7 @@ from .requirements_orchestrator import (
     LoopBHistoryManager,
     RequirementsOrchestrator,
     RequirementsOrchestratorConfig,
+    compute_file_hash,
 )
 from .schema import (
     LoopBExecutionHistory,
@@ -392,18 +393,33 @@ def _build_loopb_config(args: argparse.Namespace) -> RequirementsOrchestratorCon
 
 
 async def run_loopb_orchestrator(args: argparse.Namespace) -> LoopBExecutionHistory:
-    """Execute Loop B orchestration and return history."""
+    """Execute Loop B orchestration and return history.
+
+    Handles the following cases:
+    - Case B: Incomplete history exists -> resume from last point
+    - Case C: Completed history + YAML changed -> resume with new requirements
+    - Case D: Completed history + YAML unchanged -> re-run verification with same history_id
+    """
     requirements_path = Path(args.input_file)
     if not requirements_path.exists():
         raise FileNotFoundError(f"Requirements file not found: {requirements_path}")
 
     cwd = args.cwd or str(Path.cwd())
     history_manager = LoopBHistoryManager(cwd)
+    resolved_path = str(requirements_path.resolve())
+    current_hash = compute_file_hash(resolved_path)
 
-    # Check for incomplete history to auto-resume
+    # Case B: Check for incomplete history to auto-resume
     existing = history_manager.find_incomplete_by_path(str(requirements_path))
     if existing:
         logger.info(f"Found incomplete Loop B execution: {existing.history_id}")
+
+        # Check if requirements changed (Case C)
+        if existing.requirements_hash and existing.requirements_hash != current_hash:
+            logger.info("Requirements file changed since last execution")
+            logger.info("Resuming with updated requirements...")
+            existing.requirements_hash = current_hash  # Update hash
+
         logger.info("Auto-resuming from previous state...")
         requirements = RequirementDefinition.from_yaml(str(requirements_path))
         config = _build_loopb_config(args)
@@ -415,6 +431,47 @@ async def run_loopb_orchestrator(args: argparse.Namespace) -> LoopBExecutionHist
         )
         return await orchestrator.resume(existing)
 
+    # Check for completed history (Case C/D)
+    completed = history_manager.find_history_by_path(str(requirements_path))
+    if completed and completed.status == LoopBStatus.COMPLETED:
+        requirements = RequirementDefinition.from_yaml(str(requirements_path))
+        config = _build_loopb_config(args)
+
+        if completed.requirements_hash and completed.requirements_hash != current_hash:
+            # Case C: YAML changed -> resume from completed state with new requirements
+            logger.info(f"Found completed history: {completed.history_id}")
+            logger.info("Requirements file changed - re-running verification...")
+            completed.requirements_hash = current_hash
+            completed.status = LoopBStatus.VERIFYING_REQUIREMENTS
+            completed.error = None
+            completed.final_result = None
+            history_manager.save_history(completed)
+
+            orchestrator = RequirementsOrchestrator(
+                requirements=requirements,
+                config=config,
+                history_manager=history_manager,
+                requirements_path=str(requirements_path),
+            )
+            return await orchestrator.resume(completed)
+
+        # Case D: YAML unchanged -> re-run verification with same history_id
+        logger.info(f"Found completed history: {completed.history_id}")
+        logger.info("Requirements unchanged - re-running verification...")
+        completed.status = LoopBStatus.VERIFYING_REQUIREMENTS
+        completed.error = None
+        completed.final_result = None
+        history_manager.save_history(completed)
+
+        orchestrator = RequirementsOrchestrator(
+            requirements=requirements,
+            config=config,
+            history_manager=history_manager,
+            requirements_path=str(requirements_path),
+        )
+        return await orchestrator.resume(completed)
+
+    # New execution
     logger.info(f"Loading requirements from: {requirements_path}")
     requirements = RequirementDefinition.from_yaml(str(requirements_path))
     logger.info(f"Loaded {len(requirements.requirements)} requirements")

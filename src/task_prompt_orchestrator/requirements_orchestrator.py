@@ -1,5 +1,6 @@
 """Requirements orchestrator - Loop B implementation."""
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -9,8 +10,15 @@ from typing import Any
 import yaml
 
 from .orchestrator import (
+    BOLD,
+    CYAN,
+    DIM,
+    GREEN,
+    RESET,
+    YELLOW,
     HistoryManager,
     OrchestratorConfig,
+    default_stream_callback,
     delete_history_file,
     list_history_files,
     load_history_from_file,
@@ -41,6 +49,12 @@ from .schema import (
 logger = logging.getLogger(__name__)
 
 LOOPB_HISTORY_DIR = ".task-orchestrator-history/loopb"
+
+
+def compute_file_hash(filepath: str) -> str:
+    """Compute SHA256 hash of file content."""
+    with open(filepath, "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 @dataclass
@@ -85,9 +99,12 @@ class LoopBHistoryManager:
         if not tasks_output_dir:
             tasks_output_dir = str(self.history_dir / "tasks")
 
+        resolved_path = str(Path(requirements_path).resolve())
+        requirements_hash = compute_file_hash(resolved_path)
+
         history = LoopBExecutionHistory(
             history_id=self._generate_history_id(requirements_path),
-            requirements_path=str(Path(requirements_path).resolve()),
+            requirements_path=resolved_path,
             tasks_output_dir=tasks_output_dir,
             started_at=now,
             updated_at=now,
@@ -97,6 +114,7 @@ class LoopBHistoryManager:
             iterations=[],
             completed_task_ids=[],
             loop_c_history_ids=[],
+            requirements_hash=requirements_hash,
         )
         self.save_history(history)
         return history
@@ -132,6 +150,19 @@ class LoopBHistoryManager:
         """Find incomplete history for a given requirements file path."""
         resolved_path = str(Path(requirements_path).resolve())
         for h in self.list_incomplete_histories():
+            if h.requirements_path == resolved_path:
+                return h
+        return None
+
+    def find_history_by_path(
+        self, requirements_path: str
+    ) -> LoopBExecutionHistory | None:
+        """Find any history (including completed) for a given requirements file path.
+
+        Returns the most recent history matching the path, regardless of status.
+        """
+        resolved_path = str(Path(requirements_path).resolve())
+        for h in self.list_histories():  # Already sorted by date descending
             if h.requirements_path == resolved_path:
                 return h
         return None
@@ -172,80 +203,306 @@ class RequirementsOrchestrator:
         self._initialize_from_history(existing_history)
         return await self._run_loop()
 
+    def _get_callback(self):
+        """Get stream callback from config."""
+        return (
+            self.config.orchestrator_config.stream_callback or default_stream_callback
+        )
+
+    def _print_loop_header(self, iteration: int) -> None:
+        """Print Loop B iteration header."""
+        callback = self._get_callback()
+        if not self.config.orchestrator_config.stream_output:
+            return
+        max_iter = self.config.max_iterations
+        num_reqs = len(self.requirements.requirements)
+        callback(f"\n{BOLD}{'━' * 60}{RESET}\n")
+        callback(
+            f"{BOLD}{CYAN}🔄 LOOP B{RESET} - Iteration [{iteration + 1}/{max_iter}]\n"
+        )
+        callback(
+            f"{DIM}   Requirements: {num_reqs} | Max iterations: {max_iter}{RESET}\n"
+        )
+        callback(f"{BOLD}{'━' * 60}{RESET}\n")
+
+    def _print_step(self, step_name: str, description: str = "") -> None:
+        """Print current step in Loop B."""
+        callback = self._get_callback()
+        if not self.config.orchestrator_config.stream_output:
+            return
+        desc_str = f" - {description}" if description else ""
+        callback(f"{YELLOW}▶ [LOOP B] {step_name}{desc_str}{RESET}\n")
+
+    def _print_loop_c_start(self, iteration: int, num_tasks: int) -> None:
+        """Print Loop C execution start."""
+        callback = self._get_callback()
+        if not self.config.orchestrator_config.stream_output:
+            return
+        callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
+        callback(f"{BOLD}{GREEN}📋 LOOP C{RESET} - Starting task execution\n")
+        callback(f"{DIM}   Iteration: {iteration + 1} | Tasks: {num_tasks}{RESET}\n")
+        callback(f"{BOLD}{'-' * 60}{RESET}\n")
+
     async def _run_loop(self) -> LoopBExecutionHistory:
         """Execute the main Loop B iteration loop."""
         assert self.history is not None
 
-        start_iteration = self.history.current_iteration
+        # Determine where to resume from based on status and current_iteration
+        resume_info = self._get_resume_info()
+        start_iteration = resume_info["start_iteration"]
+        skip_task_generation = resume_info["skip_task_generation"]
+        resume_loop_c = resume_info["resume_loop_c"]
+
         for iteration in range(start_iteration, self.config.max_iterations):
-            self.history.current_iteration = iteration + 1
-            self._save_history()
+            self._print_loop_header(iteration)
+            # Only skip task generation on the first iteration of resume
+            do_skip_task_gen = skip_task_generation and iteration == start_iteration
 
-            # Step 1: Generate tasks
-            logger.info(f"Loop B iteration {iteration + 1}: Generating tasks")
-            self.history.status = LoopBStatus.GENERATING_TASKS
-            self._save_history()
-
-            tasks = await self._generate_tasks_with_coverage_check(iteration)
-            if not tasks:
-                self._fail("Failed to generate tasks with full coverage")
-                break
-
-            # Step 2: Write tasks to YAML file
-            tasks_yaml_path = self._write_tasks_yaml(tasks, iteration)
+            # Step 1 & 2: Get or generate tasks
+            tasks, tasks_yaml_path = await self._get_or_generate_tasks(
+                iteration, do_skip_task_gen
+            )
+            if tasks is None:
+                break  # _fail already called
 
             # Step 3: Execute Loop C
-            logger.info(f"Loop B iteration {iteration + 1}: Executing Loop C")
-            self.history.status = LoopBStatus.EXECUTING_TASKS
-            self._save_history()
-
-            loop_c_result, loop_c_history_id = await self._execute_loop_c(
-                tasks_yaml_path
+            should_resume_loop_c = resume_loop_c and iteration == start_iteration
+            loop_c_result, loop_c_history_id = await self._run_loop_c_step(
+                iteration, tasks_yaml_path, should_resume_loop_c, num_tasks=len(tasks)
             )
 
             # Update completed tasks
             self._update_completed_tasks(tasks, loop_c_result)
 
-            # Step 4: Verify requirements
-            logger.info(f"Loop B iteration {iteration + 1}: Verifying requirements")
-            self.history.status = LoopBStatus.VERIFYING_REQUIREMENTS
-            self._save_history()
+            # Update current_iteration after Loop C completes (if we skipped earlier)
+            if do_skip_task_gen:
+                self.history.current_iteration = iteration + 1
+                self._save_history()
 
-            verification = await self._verify_requirements()
-            unmet_requirements = get_unmet_requirement_ids(verification)
-
-            # Record iteration
-            iteration_record = LoopBIteration(
-                iteration_number=iteration + 1,
-                tasks_yaml_path=tasks_yaml_path,
-                loop_c_history_id=loop_c_history_id,
-                verification_result=verification,
-                unmet_requirements=unmet_requirements,
+            # Step 4: Verify requirements and record iteration
+            should_break = await self._verify_and_record_iteration(
+                iteration, tasks_yaml_path, loop_c_history_id
             )
-            self.history.iterations.append(iteration_record)
-            if loop_c_history_id:
-                self.history.loop_c_history_ids.append(loop_c_history_id)
-            self._save_history()
-
-            # Step 5: Check completion
-            if verification.get("all_requirements_met", False):
-                logger.info("Loop B: All requirements met")
-                self._complete(verification)
+            if should_break:
                 break
-
-            if iteration + 1 >= self.config.max_iterations:
-                self._fail(f"Max iterations ({self.config.max_iterations}) reached")
-                break
-
-            # Prepare for next iteration
-            logger.info(
-                f"Loop B: {len(unmet_requirements)} requirements not met, "
-                "generating additional tasks"
-            )
-            self.history.status = LoopBStatus.GENERATING_ADDITIONAL_TASKS
-            self._save_history()
 
         return self.history
+
+    async def _get_or_generate_tasks(
+        self, iteration: int, skip_generation: bool
+    ) -> tuple[list[Task] | None, str]:
+        """Get existing tasks or generate new ones for the iteration.
+
+        Returns:
+            Tuple of (tasks, tasks_yaml_path). tasks is None if generation failed.
+        """
+        assert self.history is not None
+
+        if not skip_generation:
+            return await self._generate_new_tasks(iteration)
+
+        # Resume: try to find existing tasks
+        return await self._load_or_regenerate_tasks(iteration)
+
+    async def _generate_new_tasks(
+        self, iteration: int
+    ) -> tuple[list[Task] | None, str]:
+        """Generate new tasks for the iteration."""
+        assert self.history is not None
+
+        self.history.current_iteration = iteration + 1
+        self._save_history()
+
+        logger.info(f"Loop B iteration {iteration + 1}: Generating tasks")
+        self._print_step("TASK GENERATION", "Generating tasks from requirements")
+        self.history.status = LoopBStatus.GENERATING_TASKS
+        self._save_history()
+
+        tasks = await self._generate_tasks_with_coverage_check(iteration)
+        if not tasks:
+            self._fail("Failed to generate tasks with full coverage")
+            return None, ""
+
+        tasks_yaml_path = self._write_tasks_yaml(tasks, iteration)
+        return tasks, tasks_yaml_path
+
+    async def _load_or_regenerate_tasks(
+        self, iteration: int
+    ) -> tuple[list[Task] | None, str]:
+        """Load existing tasks or regenerate if not found."""
+        assert self.history is not None
+
+        # First check if there's an iteration record for this iteration
+        existing_iter = next(
+            (
+                it
+                for it in self.history.iterations
+                if it.iteration_number == iteration + 1
+            ),
+            None,
+        )
+        if existing_iter and Path(existing_iter.tasks_yaml_path).exists():
+            tasks_yaml_path = existing_iter.tasks_yaml_path
+            task_def = TaskDefinition.from_yaml(tasks_yaml_path)
+            logger.info(
+                f"Loop B iteration {iteration + 1}: Resuming with existing tasks from {tasks_yaml_path}"
+            )
+            return task_def.tasks, tasks_yaml_path
+
+        # Try to find tasks file by expected name (may exist even without iteration record)
+        expected_path = self._get_expected_tasks_path(iteration)
+        if expected_path and Path(expected_path).exists():
+            task_def = TaskDefinition.from_yaml(expected_path)
+            logger.info(
+                f"Loop B iteration {iteration + 1}: Resuming with tasks from {expected_path}"
+            )
+            return task_def.tasks, expected_path
+
+        # Fallback: regenerate tasks if file missing
+        logger.warning("Cannot resume: tasks file missing, regenerating")
+        return await self._generate_new_tasks(iteration)
+
+    async def _run_loop_c_step(
+        self, iteration: int, tasks_yaml_path: str, resume: bool, num_tasks: int = 0
+    ) -> tuple[OrchestratorResult, str | None]:
+        """Execute Loop C step."""
+        assert self.history is not None
+
+        logger.info(f"Loop B iteration {iteration + 1}: Executing Loop C")
+        self._print_loop_c_start(iteration, num_tasks)
+        self.history.status = LoopBStatus.EXECUTING_TASKS
+        self._save_history()
+
+        return await self._execute_loop_c(tasks_yaml_path, resume=resume)
+
+    async def _verify_and_record_iteration(
+        self, iteration: int, tasks_yaml_path: str, loop_c_history_id: str | None
+    ) -> bool:
+        """Verify requirements and record iteration. Returns True if loop should break."""
+        assert self.history is not None
+
+        logger.info(f"Loop B iteration {iteration + 1}: Verifying requirements")
+        self._print_step("VERIFICATION", "Checking if requirements are met")
+        self.history.status = LoopBStatus.VERIFYING_REQUIREMENTS
+        self._save_history()
+
+        verification = await self._verify_requirements()
+        unmet_requirements = get_unmet_requirement_ids(verification)
+
+        # Record or update iteration
+        self._record_iteration(
+            iteration,
+            tasks_yaml_path,
+            loop_c_history_id,
+            verification,
+            unmet_requirements,
+        )
+
+        # Check completion
+        if verification.get("all_requirements_met", False):
+            logger.info("Loop B: All requirements met")
+            self._complete(verification)
+            return True
+
+        if iteration + 1 >= self.config.max_iterations:
+            self._fail(f"Max iterations ({self.config.max_iterations}) reached")
+            return True
+
+        # Prepare for next iteration
+        logger.info(
+            f"Loop B: {len(unmet_requirements)} requirements not met, "
+            "generating additional tasks"
+        )
+        self.history.status = LoopBStatus.GENERATING_ADDITIONAL_TASKS
+        self._save_history()
+        return False
+
+    def _record_iteration(
+        self,
+        iteration: int,
+        tasks_yaml_path: str,
+        loop_c_history_id: str | None,
+        verification: dict[str, Any],
+        unmet_requirements: list[str],
+    ) -> None:
+        """Record or update iteration in history."""
+        assert self.history is not None
+
+        existing_iter_idx = next(
+            (
+                i
+                for i, it in enumerate(self.history.iterations)
+                if it.iteration_number == iteration + 1
+            ),
+            None,
+        )
+        iteration_record = LoopBIteration(
+            iteration_number=iteration + 1,
+            tasks_yaml_path=tasks_yaml_path,
+            loop_c_history_id=loop_c_history_id,
+            verification_result=verification,
+            unmet_requirements=unmet_requirements,
+        )
+        if existing_iter_idx is not None:
+            self.history.iterations[existing_iter_idx] = iteration_record
+        else:
+            self.history.iterations.append(iteration_record)
+        if (
+            loop_c_history_id
+            and loop_c_history_id not in self.history.loop_c_history_ids
+        ):
+            self.history.loop_c_history_ids.append(loop_c_history_id)
+        self._save_history()
+
+    def _get_resume_info(self) -> dict[str, Any]:
+        """Determine resume point based on status and history state."""
+        assert self.history is not None
+
+        status = self.history.status
+        current_iter = self.history.current_iteration
+
+        # Default: start fresh from iteration 0
+        if current_iter == 0:
+            return {
+                "start_iteration": 0,
+                "skip_task_generation": False,
+                "resume_loop_c": False,
+            }
+
+        # If we were executing tasks (Loop C), resume that iteration
+        if status == LoopBStatus.EXECUTING_TASKS:
+            return {
+                "start_iteration": current_iter - 1,  # 0-indexed
+                "skip_task_generation": True,  # Tasks already generated
+                "resume_loop_c": True,  # Resume Loop C from where it stopped
+            }
+
+        # If we were generating tasks, restart task generation for that iteration
+        if status == LoopBStatus.GENERATING_TASKS:
+            return {
+                "start_iteration": current_iter - 1,
+                "skip_task_generation": False,
+                "resume_loop_c": False,
+            }
+
+        # If verifying or generating additional tasks, continue to next iteration
+        # (previous iteration completed)
+        if status in {
+            LoopBStatus.VERIFYING_REQUIREMENTS,
+            LoopBStatus.GENERATING_ADDITIONAL_TASKS,
+        }:
+            return {
+                "start_iteration": current_iter,  # Continue with next iteration
+                "skip_task_generation": False,
+                "resume_loop_c": False,
+            }
+
+        # Completed or failed - shouldn't normally reach here
+        return {
+            "start_iteration": current_iter,
+            "skip_task_generation": False,
+            "resume_loop_c": False,
+        }
 
     def _initialize_new(self) -> None:
         """Initialize new history and state for fresh run."""
@@ -444,22 +701,72 @@ class RequirementsOrchestrator:
         logger.info(f"Generated tasks written to: {filepath}")
         return str(filepath)
 
+    def _get_expected_tasks_path(self, iteration: int) -> str | None:
+        """Get the expected tasks YAML path for a given iteration.
+
+        This is used when resuming to find the tasks file even if the
+        iteration record hasn't been created yet.
+        """
+        if not self.history:
+            return None
+
+        output_dir = Path(self.history.tasks_output_dir)
+        req_name = (
+            Path(self.requirements_path).stem if self.requirements_path else "tasks"
+        )
+        filename = f"{req_name}-tasks-iter{iteration + 1}.yaml"
+        return str(output_dir / filename)
+
     async def _execute_loop_c(
-        self, tasks_yaml_path: str
+        self, tasks_yaml_path: str, resume: bool = False
     ) -> tuple[OrchestratorResult, str | None]:
-        """Execute Loop C with the generated tasks."""
+        """Execute Loop C with the generated tasks.
+
+        Args:
+            tasks_yaml_path: Path to the tasks YAML file
+            resume: If True, try to resume from incomplete Loop C history
+
+        Returns:
+            Tuple of (OrchestratorResult, loop_c_history_id)
+        """
         task_definition = TaskDefinition.from_yaml(tasks_yaml_path)
+        resume_history = None
+        resume_point = None
+
+        # Try to find incomplete Loop C history for this tasks file
+        if resume and self.loop_c_history_manager:
+            resolved_path = str(Path(tasks_yaml_path).resolve())
+            for history in self.loop_c_history_manager.list_incomplete_histories():
+                if history.yaml_path == resolved_path:
+                    resume_history = history
+                    # Determine resume point from history
+                    if history.current_task_id and history.current_phase:
+                        from .schema import ResumePoint, ExecutionPhase
+
+                        resume_point = ResumePoint(
+                            task_id=history.current_task_id,
+                            phase=ExecutionPhase(history.current_phase),
+                        )
+                    logger.info(
+                        f"Resuming Loop C from history: {history.history_id}, "
+                        f"task: {history.current_task_id}, phase: {history.current_phase}"
+                    )
+                    break
 
         result = await run_orchestrator(
             task_definition,
             config=self.config.orchestrator_config,
             yaml_path=tasks_yaml_path,
             history_manager=self.loop_c_history_manager,
+            resume_point=resume_point,
+            resume_history=resume_history,
         )
 
-        # Get the history ID from the most recent history
+        # Get the history ID from the most recent history or resumed history
         loop_c_history_id = None
-        if self.loop_c_history_manager:
+        if resume_history:
+            loop_c_history_id = resume_history.history_id
+        elif self.loop_c_history_manager:
             histories = self.loop_c_history_manager.list_histories()
             if histories:
                 loop_c_history_id = histories[0].history_id

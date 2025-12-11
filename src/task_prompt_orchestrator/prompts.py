@@ -14,6 +14,8 @@ def _format_requirements_with_ids(requirements: list[Requirement]) -> str:
     lines = []
     for req in requirements:
         lines.append(f"### {req.id}: {req.name}")
+        if req.notes:
+            lines.append(f"**Notes**: {req.notes}")
         lines.append("**Acceptance Criteria**:")
         for i, criterion in enumerate(req.acceptance_criteria, 1):
             criterion_id = f"{req.id}.{i}"
@@ -27,6 +29,8 @@ def _format_requirements(requirements: list[Requirement]) -> str:
     lines = []
     for req in requirements:
         lines.append(f"### {req.id}: {req.name}")
+        if req.notes:
+            lines.append(f"**Notes**: {req.notes}")
         lines.append("**Acceptance Criteria**:")
         for criterion in req.acceptance_criteria:
             lines.append(f"  - {criterion}")
