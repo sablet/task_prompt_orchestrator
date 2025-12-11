@@ -28,6 +28,7 @@ from .schema import (
     ResumePoint,
     TaskDefinition,
     YamlType,
+    create_sample_requirements_yaml,
     create_sample_task_yaml,
     detect_yaml_type,
 )
@@ -706,7 +707,17 @@ def main() -> int:
     args = parse_args()
 
     if args.command == "sample":
+        print("# " + "=" * 70)
+        print("# Loop C: Task Definition (task-orchestrator run tasks.yaml)")
+        print("# " + "=" * 70)
         print(create_sample_task_yaml())
+        print()
+        print("# " + "=" * 70)
+        print(
+            "# Loop B: Requirements Definition (task-orchestrator run requirements.yaml)"
+        )
+        print("# " + "=" * 70)
+        print(create_sample_requirements_yaml())
         return 0
     if args.command == "run":
         return anyio.run(run_command, args)

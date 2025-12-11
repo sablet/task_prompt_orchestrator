@@ -426,38 +426,33 @@ class LoopBExecutionHistory:
 
 def create_sample_requirements_yaml() -> str:
     """Return sample requirements YAML content for reference."""
-    return """# Requirements Definition
+    return """# Requirements Definition (Loop B)
 # Format reference for task_prompt_orchestrator Loop B
-
-name: "Sample Feature"
-context: |
-  Python 3.10以上の環境で動作するサンプルモジュールを開発する。
-  コードは output/ ディレクトリに配置する。
+#
+# Loop B generates tasks from requirements automatically,
+# then executes Loop C for each generated task set.
 
 requirements:
-  - id: req_1
-    description: "基本的な挨拶関数の実装"
+  - id: req_greeting
+    name: 基本的な挨拶関数の実装
+    notes: |
+      output/greeting.py に実装する。
+      型ヒントを使用すること。
     acceptance_criteria:
       - "hello(name) 関数が存在し、'Hello, {name}!' を返す"
       - "デフォルト引数で hello() を呼ぶと 'Hello, World!' を返す"
-    priority: required
 
-  - id: req_2
-    description: "挨拶バリエーションの追加"
+  - id: req_variations
+    name: 挨拶バリエーションの追加
     acceptance_criteria:
       - "goodbye(name) 関数が存在し、'Goodbye, {name}!' を返す"
       - "greet(name, greeting) で任意の挨拶ができる"
-    priority: required
 
-  - id: req_3
-    description: "ユニットテストの作成"
+  - id: req_tests
+    name: ユニットテストの作成
+    notes: pytestを使用
     acceptance_criteria:
       - "pytest で実行可能なテストファイルが存在"
       - "全関数に対して最低2つのテストケース"
       - "全テストがパスする"
-    priority: optional
-
-constraints:
-  - "ruff format / ruff check がエラーなくパスすること"
-  - "型ヒントを使用すること"
 """
