@@ -2,9 +2,19 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    pass
+
+
+def _load_static_template(template_name: str) -> str:
+    """Load a static template (lazy import to avoid circular dependency)."""
+    from .templates import load_static_template
+
+    return load_static_template(template_name)
 
 
 # =============================================================================
@@ -253,35 +263,7 @@ def detect_yaml_type(yaml_path: str) -> YamlType:
 
 def create_sample_task_yaml() -> str:
     """Return sample YAML content for reference."""
-    return """# Task Orchestrator Definition
-# Format reference for claude-code task automation
-
-tasks:
-  - id: task_1
-    name: Sample Task 1
-    instruction: |
-      Implement the following feature:
-      1. Create a new file `output/sample.py`
-      2. Add a function that returns "Hello, World!"
-    validation:
-      - "`output/sample.py` exists"
-      - "Function `hello()` is defined"
-      - "Running `python output/sample.py` outputs 'Hello, World!'"
-
-  - id: task_2
-    name: Sample Task 2
-    depends_on: [task_1]
-    instruction: |
-      Extend the previous implementation:
-      1. Add a second function `goodbye()` that returns "Goodbye!"
-    validation:
-      - "Function `goodbye()` is defined in `output/sample.py`"
-      - "Both functions work correctly"
-
-quality_checks:
-  per_task: "make format lint"
-  final: "make test"
-"""
+    return _load_static_template("sample_task_yaml.j2")
 
 
 # =============================================================================
@@ -426,33 +408,4 @@ class LoopBExecutionHistory:
 
 def create_sample_requirements_yaml() -> str:
     """Return sample requirements YAML content for reference."""
-    return """# Requirements Definition (Loop B)
-# Format reference for task_prompt_orchestrator Loop B
-#
-# Loop B generates tasks from requirements automatically,
-# then executes Loop C for each generated task set.
-
-requirements:
-  - id: req_greeting
-    name: 基本的な挨拶関数の実装
-    notes: |
-      output/greeting.py に実装する。
-      型ヒントを使用すること。
-    acceptance_criteria:
-      - "hello(name) 関数が存在し、'Hello, {name}!' を返す"
-      - "デフォルト引数で hello() を呼ぶと 'Hello, World!' を返す"
-
-  - id: req_variations
-    name: 挨拶バリエーションの追加
-    acceptance_criteria:
-      - "goodbye(name) 関数が存在し、'Goodbye, {name}!' を返す"
-      - "greet(name, greeting) で任意の挨拶ができる"
-
-  - id: req_tests
-    name: ユニットテストの作成
-    notes: pytestを使用
-    acceptance_criteria:
-      - "pytest で実行可能なテストファイルが存在"
-      - "全関数に対して最低2つのテストケース"
-      - "全テストがパスする"
-"""
+    return _load_static_template("sample_requirements_yaml.j2")

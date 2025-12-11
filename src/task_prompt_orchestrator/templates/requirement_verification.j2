@@ -1,0 +1,26 @@
+## Requirement Verification
+
+### Requirements
+{{ requirements_text }}
+
+### Completed Tasks
+{{ task_results_text }}
+
+### Instructions
+Verify if each requirement's acceptance criteria are met based on completed tasks.
+
+Output in JSON format:
+```json
+{
+  "all_requirements_met": true/false,
+  "requirement_status": [
+    {
+      "requirement_id": "req_1",
+      "met": true/false,
+      "evidence": "Evidence or explanation"
+    }
+  ],
+  "summary": "Overall summary",
+  "feedback_for_additional_tasks": "Feedback for next iteration if requirements not met"
+}
+```

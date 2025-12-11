@@ -1,0 +1,28 @@
+# Task Orchestrator Definition
+# Format reference for claude-code task automation
+
+tasks:
+  - id: task_1
+    name: Sample Task 1
+    instruction: |
+      Implement the following feature:
+      1. Create a new file `output/sample.py`
+      2. Add a function that returns "Hello, World!"
+    validation:
+      - "`output/sample.py` exists"
+      - "Function `hello()` is defined"
+      - "Running `python output/sample.py` outputs 'Hello, World!'"
+
+  - id: task_2
+    name: Sample Task 2
+    depends_on: [task_1]
+    instruction: |
+      Extend the previous implementation:
+      1. Add a second function `goodbye()` that returns "Goodbye!"
+    validation:
+      - "Function `goodbye()` is defined in `output/sample.py`"
+      - "Both functions work correctly"
+
+quality_checks:
+  per_task: "make format lint"
+  final: "make test"

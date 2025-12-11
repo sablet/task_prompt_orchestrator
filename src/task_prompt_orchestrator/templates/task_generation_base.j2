@@ -1,0 +1,32 @@
+## タスク設計の原則
+
+1. **単一責任**: 1タスク = 1つの明確な成果物
+2. **検証可能**: 各タスクに機械的に確認可能な validation を定義
+3. **依存関係の明示**: depends_on で順序を制御
+4. **自己完結**: 各タスクの instruction は単独で実行可能な情報を含む
+5. **セットアップと作業の分離**: ツールのインストール等のセットアップは、それを使う作業と同一タスクにしない
+6. **カバレッジ必須**: 全ての acceptance_criteria が少なくとも1つの validation でカバーされること
+
+## 出力フォーマット
+
+各 validation には `covers` で対応する acceptance_criteria ID を明示してください。
+
+```yaml
+tasks:
+  - id: task_1
+    name: {タスク名}
+    depends_on: []
+    instruction: |
+      {具体的な作業指示}
+
+      ## 変更対象
+      - `src/{path/to/file}`: {変更内容}
+
+      ## 関連パス
+      - `src/{path/to/related}`: {役割・関係性}
+    validation:
+      - criterion: "{検証項目1}"
+        covers: [req_id.1, req_id.2]
+      - criterion: "{検証項目2}"
+        covers: [req_id.3]
+```

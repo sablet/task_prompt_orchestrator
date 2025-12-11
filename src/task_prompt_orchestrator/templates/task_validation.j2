@@ -1,0 +1,26 @@
+## Validation for Task: {{ task_name }}
+
+The following instruction was executed:
+{{ instruction }}
+
+### Execution Output:
+{{ instruction_output }}
+
+### Validation Criteria:
+{% for criterion in validation_criteria %}
+- {{ criterion }}
+{% endfor %}
+
+Please verify ALL of the above validation criteria are met.
+
+Respond with a JSON object in the following format:
+```json
+{
+  "approved": true/false,
+  "checks": [
+    {"criterion": "criterion text", "passed": true/false, "details": "explanation"}
+  ],
+  "summary": "overall validation summary",
+  "feedback": "if not approved, specific feedback for retry"
+}
+```

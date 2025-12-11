@@ -19,6 +19,7 @@ from .schema import (
     LoopBStatus,
     RequirementDefinition,
 )
+from .templates import load_static_template
 
 logger = logging.getLogger(__name__)
 
@@ -27,31 +28,10 @@ logger = logging.getLogger(__name__)
 # Dry Run
 # =============================================================================
 
-_LOOPB_FLOW_DIAGRAM = """\
-  ┌─────────────────────────────────────────────────────────────┐
-  │  1. TASK GENERATION                                        │
-  │     LLM generates tasks from requirements                  │
-  │     Output: tasks YAML file                                │
-  └─────────────────────────────────────────────────────────────┘
-                              ↓
-  ┌─────────────────────────────────────────────────────────────┐
-  │  2. LOOP C EXECUTION                                       │
-  │     For each generated task:                               │
-  │       instruction → validation → approved/retry            │
-  └─────────────────────────────────────────────────────────────┘
-                              ↓
-  ┌─────────────────────────────────────────────────────────────┐
-  │  3. REQUIREMENTS VERIFICATION                              │
-  │     LLM checks if all acceptance criteria are met          │
-  └─────────────────────────────────────────────────────────────┘
-                              ↓
-          ┌──────────────────────────────────────┐
-          │  All requirements met?               │
-          │    YES → DONE                        │
-          │    NO  → Generate additional tasks   │
-          │          (back to step 1)            │
-          └──────────────────────────────────────┘
-"""
+
+def _get_loopb_flow_diagram() -> str:
+    """Load the Loop B flow diagram from template."""
+    return load_static_template("loopb_flow_diagram.txt")
 
 
 DEFAULT_MAX_ITERATIONS = 3
@@ -110,7 +90,7 @@ def print_loopb_dry_run(args: argparse.Namespace) -> int:
     print()
     print(f"Loop B will iterate up to {DEFAULT_MAX_ITERATIONS} times:")
     print()
-    print(_LOOPB_FLOW_DIAGRAM)
+    print(_get_loopb_flow_diagram())
 
     print("=" * 70)
     print("## Task Generation Prompt (iteration 1)")

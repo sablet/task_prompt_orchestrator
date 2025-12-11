@@ -30,6 +30,7 @@ from .schema import (
     TaskResult,
     TaskStatus,
 )
+from .templates import render_template
 
 logger = logging.getLogger(__name__)
 
@@ -227,48 +228,23 @@ class HistoryManager:
 
 def build_instruction_prompt(task: Task, cwd: str | None = None) -> str:
     """Build prompt for task instruction execution."""
-    cwd_note = (
-        f"\n**Working directory: {cwd}**\nAll relative paths should be resolved from this directory.\n"
-        if cwd
-        else ""
+    return render_template(
+        "task_instruction.j2",
+        task_name=task.name,
+        cwd=cwd,
+        instruction=task.instruction,
     )
-    return f"""## Task: {task.name}
-{cwd_note}
-{task.instruction}
-
-Please complete this task. When done, provide a summary of what was accomplished.
-"""
 
 
 def build_validation_prompt(task: Task, instruction_output: str) -> str:
     """Build prompt for task validation."""
-    validation_criteria = "\n".join(f"- {v}" for v in task.validation)
-
-    return f"""## Validation for Task: {task.name}
-
-The following instruction was executed:
-{task.instruction}
-
-### Execution Output:
-{instruction_output}
-
-### Validation Criteria:
-{validation_criteria}
-
-Please verify ALL of the above validation criteria are met.
-
-Respond with a JSON object in the following format:
-```json
-{{
-  "approved": true/false,
-  "checks": [
-    {{"criterion": "criterion text", "passed": true/false, "details": "explanation"}}
-  ],
-  "summary": "overall validation summary",
-  "feedback": "if not approved, specific feedback for retry"
-}}
-```
-"""
+    return render_template(
+        "task_validation.j2",
+        task_name=task.name,
+        instruction=task.instruction,
+        instruction_output=instruction_output,
+        validation_criteria=task.validation,
+    )
 
 
 def extract_validation_result(output: str) -> tuple[bool, str]:

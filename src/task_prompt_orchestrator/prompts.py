@@ -7,6 +7,7 @@ from typing import Any
 import yaml
 
 from .schema import Requirement, RequirementDefinition, Task, TaskResult, ValidationItem
+from .templates import render_template
 
 
 def _format_requirements_with_ids(requirements: list[Requirement]) -> str:
@@ -65,41 +66,6 @@ def _format_task_results(results: list[TaskResult]) -> str:
     return "\n".join(lines)
 
 
-TASK_GENERATION_BASE = """## タスク設計の原則
-
-1. **単一責任**: 1タスク = 1つの明確な成果物
-2. **検証可能**: 各タスクに機械的に確認可能な validation を定義
-3. **依存関係の明示**: depends_on で順序を制御
-4. **自己完結**: 各タスクの instruction は単独で実行可能な情報を含む
-5. **セットアップと作業の分離**: ツールのインストール等のセットアップは、それを使う作業と同一タスクにしない
-6. **カバレッジ必須**: 全ての acceptance_criteria が少なくとも1つの validation でカバーされること
-
-## 出力フォーマット
-
-各 validation には `covers` で対応する acceptance_criteria ID を明示してください。
-
-```yaml
-tasks:
-  - id: task_1
-    name: {タスク名}
-    depends_on: []
-    instruction: |
-      {具体的な作業指示}
-
-      ## 変更対象
-      - `src/{path/to/file}`: {変更内容}
-
-      ## 関連パス
-      - `src/{path/to/related}`: {役割・関係性}
-    validation:
-      - criterion: "{検証項目1}"
-        covers: [req_id.1, req_id.2]
-      - criterion: "{検証項目2}"
-        covers: [req_id.3]
-```
-"""
-
-
 def build_task_generation_prompt(
     requirements: RequirementDefinition,
     completed_tasks: list[Task] | None = None,
@@ -109,32 +75,17 @@ def build_task_generation_prompt(
     req_text = _format_requirements_with_ids(requirements.requirements)
 
     if completed_tasks:
-        return f"""# 追加タスク生成
+        return render_template(
+            "task_generation_additional.j2",
+            requirements_text=req_text,
+            completed_tasks_text=_format_completed_tasks(completed_tasks),
+            previous_feedback=previous_feedback or "(none)",
+        )
 
-## 要件
-{req_text}
-
-## 完了済みタスク
-{_format_completed_tasks(completed_tasks)}
-
-## 前回のフィードバック
-{previous_feedback or "(none)"}
-
-## 指示
-未達成の要件を満たすための追加タスクを生成してください。
-完了済みタスクは変更せず、新しいタスクは既存のtask IDに依存可能です。
-
-{TASK_GENERATION_BASE}"""
-
-    return f"""# タスク生成
-
-## 要件
-{req_text}
-
-## 指示
-上記の要件をすべて満たすタスクを生成してください。
-
-{TASK_GENERATION_BASE}"""
+    return render_template(
+        "task_generation_initial.j2",
+        requirements_text=req_text,
+    )
 
 
 def build_requirement_verification_prompt(
@@ -142,33 +93,11 @@ def build_requirement_verification_prompt(
     completed_task_results: list[TaskResult],
 ) -> str:
     """Build prompt for verifying if requirements are met."""
-    return f"""## Requirement Verification
-
-### Requirements
-{_format_requirements(requirements.requirements)}
-
-### Completed Tasks
-{_format_task_results(completed_task_results)}
-
-### Instructions
-Verify if each requirement's acceptance criteria are met based on completed tasks.
-
-Output in JSON format:
-```json
-{{
-  "all_requirements_met": true/false,
-  "requirement_status": [
-    {{
-      "requirement_id": "req_1",
-      "met": true/false,
-      "evidence": "Evidence or explanation"
-    }}
-  ],
-  "summary": "Overall summary",
-  "feedback_for_additional_tasks": "Feedback for next iteration if requirements not met"
-}}
-```
-"""
+    return render_template(
+        "requirement_verification.j2",
+        requirements_text=_format_requirements(requirements.requirements),
+        task_results_text=_format_task_results(completed_task_results),
+    )
 
 
 def _parse_validation_items(

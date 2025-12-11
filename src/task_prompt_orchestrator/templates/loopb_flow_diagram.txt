@@ -1,0 +1,23 @@
+  ┌─────────────────────────────────────────────────────────────┐
+  │  1. TASK GENERATION                                        │
+  │     LLM generates tasks from requirements                  │
+  │     Output: tasks YAML file                                │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │  2. LOOP C EXECUTION                                       │
+  │     For each generated task:                               │
+  │       instruction → validation → approved/retry            │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │  3. REQUIREMENTS VERIFICATION                              │
+  │     LLM checks if all acceptance criteria are met          │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+          ┌──────────────────────────────────────┐
+          │  All requirements met?               │
+          │    YES → DONE                        │
+          │    NO  → Generate additional tasks   │
+          │          (back to step 1)            │
+          └──────────────────────────────────────┘
