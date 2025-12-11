@@ -8,6 +8,10 @@ from pathlib import Path
 
 import anyio
 
+from .cli_loopb import (
+    handle_loopb_history,
+    run_requirements_command,
+)
 from .orchestrator import (
     HistoryManager,
     OrchestratorConfig,
@@ -31,8 +35,11 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-  # Run tasks from YAML file
+  # Run tasks from YAML file (Loop C)
   task-orchestrator run tasks.yaml
+
+  # Run requirements-driven execution (Loop B)
+  task-orchestrator run-requirements requirements.yaml
 
   # Run with custom settings
   task-orchestrator run tasks.yaml --max-retries 5 --cwd /path/to/project
@@ -42,6 +49,7 @@ Example usage:
 
   # List execution history
   task-orchestrator history
+  task-orchestrator history --loopb
 
   # Generate sample YAML
   task-orchestrator sample > sample_tasks.yaml
@@ -111,6 +119,73 @@ Example usage:
         help="Disable history tracking",
     )
 
+    # Run-requirements command (Loop B)
+    run_req_parser = subparsers.add_parser(
+        "run-requirements", help="Run requirements-driven execution (Loop B)"
+    )
+    run_req_parser.add_argument(
+        "requirements_file", type=str, help="Path to requirements YAML"
+    )
+    run_req_parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=5,
+        help="Max Loop B iterations (default: 5)",
+    )
+    run_req_parser.add_argument(
+        "--tasks-output-dir",
+        type=str,
+        default=None,
+        help="Directory for generated task YAML files",
+    )
+    run_req_parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Max retries per task in Loop C (default: 3)",
+    )
+    run_req_parser.add_argument(
+        "--max-total-retries",
+        type=int,
+        default=10,
+        help="Max total retries in Loop C (default: 10)",
+    )
+    run_req_parser.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        help="Working directory for Claude Code execution",
+    )
+    run_req_parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to use (e.g., claude-sonnet-4-20250514)",
+    )
+    run_req_parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Output file for results JSON",
+    )
+    run_req_parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    run_req_parser.add_argument(
+        "--no-web",
+        action="store_true",
+        help="Disable WebFetch and WebSearch tools",
+    )
+    run_req_parser.add_argument(
+        "--bypass-permissions",
+        action="store_true",
+        help="Use bypassPermissions mode (use with caution)",
+    )
+
     # Resume command
     resume_parser = subparsers.add_parser("resume", help="Resume execution from history")
     resume_parser.add_argument("history_id", type=str, help="History ID to resume")
@@ -172,6 +247,18 @@ Example usage:
         default=None,
         metavar="HISTORY_ID",
         help="Delete a specific history entry",
+    )
+    history_parser.add_argument(
+        "--loopb",
+        action="store_true",
+        help="Show Loop B (requirements) history instead of Loop C",
+    )
+    history_parser.add_argument(
+        "--loopb-children",
+        type=str,
+        default=None,
+        metavar="LOOPB_HISTORY_ID",
+        help="Show Loop C histories for a specific Loop B execution",
     )
 
     # Sample command
@@ -301,6 +388,11 @@ def format_history_detail(history: ExecutionHistory) -> str:
 def history_command(args: argparse.Namespace) -> int:
     """Execute the history command."""
     cwd = args.cwd or str(Path.cwd())
+
+    # Handle Loop B history
+    if args.loopb or args.loopb_children:
+        return handle_loopb_history(args, cwd, format_history_summary)
+
     history_manager = HistoryManager(cwd)
 
     # Handle delete
@@ -558,6 +650,8 @@ def main() -> int:
         return 0
     if args.command == "run":
         return anyio.run(run_command, args)
+    if args.command == "run-requirements":
+        return anyio.run(run_requirements_command, args)
     if args.command == "history":
         return history_command(args)
     if args.command == "resume":
