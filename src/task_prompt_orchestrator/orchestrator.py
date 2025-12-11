@@ -208,6 +208,14 @@ class HistoryManager:
         """List only incomplete (resumable) histories."""
         return [h for h in self.list_histories() if not h.completed]
 
+    def find_incomplete_by_path(self, yaml_path: str) -> ExecutionHistory | None:
+        """Find incomplete history for a given YAML file path."""
+        resolved_path = str(Path(yaml_path).resolve())
+        for h in self.list_incomplete_histories():
+            if h.yaml_path == resolved_path:
+                return h
+        return None
+
     def delete_history(self, history_id: str) -> bool:
         """Delete a history file."""
         file_path = self._history_file_path(history_id)

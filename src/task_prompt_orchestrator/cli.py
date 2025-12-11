@@ -11,7 +11,8 @@ import anyio
 
 from .cli_loopb import (
     handle_loopb_history,
-    run_requirements_command,
+    output_loopb_result,
+    run_loopb_orchestrator,
 )
 from .orchestrator import (
     HistoryManager,
@@ -26,7 +27,9 @@ from .schema import (
     OrchestratorResult,
     ResumePoint,
     TaskDefinition,
+    YamlType,
     create_sample_task_yaml,
+    detect_yaml_type,
 )
 
 logging.basicConfig(
@@ -34,6 +37,75 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Argument Parser Helpers
+# =============================================================================
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Add common arguments shared by run/resume commands."""
+    parser.add_argument(
+        "--cwd",
+        type=str,
+        default=None,
+        help="Working directory for Claude Code execution",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        help="Model to use (e.g., claude-sonnet-4-20250514)",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=str,
+        default=None,
+        help="Output file for results JSON",
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help="Enable verbose logging",
+    )
+    parser.add_argument(
+        "--no-web",
+        action="store_true",
+        help="Disable WebFetch and WebSearch tools",
+    )
+    parser.add_argument(
+        "--bypass-permissions",
+        action="store_true",
+        help="Use bypassPermissions mode (use with caution)",
+    )
+
+
+def _add_retry_args(parser: argparse.ArgumentParser) -> None:
+    """Add retry-related arguments."""
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="Max retries per task (default: 3)",
+    )
+    parser.add_argument(
+        "--max-total-retries",
+        type=int,
+        default=10,
+        help="Max total retries across all tasks (default: 10)",
+    )
+
+
+def _add_loopb_flag(parser: argparse.ArgumentParser) -> None:
+    """Add --loopb flag to switch between Loop C and Loop B."""
+    parser.add_argument(
+        "--loopb",
+        action="store_true",
+        help="Force Loop B mode (auto-detected from file content if omitted)",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,13 +119,16 @@ Example usage:
   task-orchestrator run tasks.yaml
 
   # Run requirements-driven execution (Loop B)
-  task-orchestrator run-requirements requirements.yaml
+  task-orchestrator run requirements.yaml --loopb
 
   # Run with custom settings
   task-orchestrator run tasks.yaml --max-retries 5 --cwd /path/to/project
 
-  # Resume from a specific point
+  # Resume from a specific point (Loop C)
   task-orchestrator resume <history_id> --from task2_validation
+
+  # Resume Loop B execution
+  task-orchestrator resume <history_id> --loopb
 
   # List execution history
   task-orchestrator history
@@ -66,168 +141,41 @@ Example usage:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Run command
-    run_parser = subparsers.add_parser("run", help="Run tasks from YAML file")
-    run_parser.add_argument("yaml_file", type=str, help="Path to task definition YAML")
-    run_parser.add_argument(
-        "--max-retries",
-        type=int,
-        default=3,
-        help="Max retries per task (default: 3)",
+    # Run command (unified for Loop C and Loop B)
+    run_parser = subparsers.add_parser(
+        "run", help="Run tasks/requirements from YAML file"
     )
     run_parser.add_argument(
-        "--max-total-retries",
-        type=int,
-        default=10,
-        help="Max total retries across all tasks (default: 10)",
+        "input_file", type=str, help="Path to task or requirements YAML"
     )
-    run_parser.add_argument(
-        "--cwd",
-        type=str,
-        default=None,
-        help="Working directory for Claude Code execution",
-    )
-    run_parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Model to use (e.g., claude-sonnet-4-20250514)",
-    )
-    run_parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        default=None,
-        help="Output file for results JSON",
-    )
-    run_parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    run_parser.add_argument(
-        "--no-web",
-        action="store_true",
-        help="Disable WebFetch and WebSearch tools (reduce cost)",
-    )
+    _add_loopb_flag(run_parser)
+    _add_common_args(run_parser)
+    _add_retry_args(run_parser)
     run_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Show prompts and config without executing",
-    )
-    run_parser.add_argument(
-        "--bypass-permissions",
-        action="store_true",
-        help="Use bypassPermissions mode (use with caution)",
-    )
-    run_parser.add_argument(
-        "--no-history",
-        action="store_true",
-        help="Disable history tracking",
+        help="Show execution flow and prompts without executing",
     )
 
-    # Run-requirements command (Loop B)
-    run_req_parser = subparsers.add_parser(
-        "run-requirements", help="Run requirements-driven execution (Loop B)"
-    )
-    run_req_parser.add_argument(
-        "requirements_file", type=str, help="Path to requirements YAML"
-    )
-    run_req_parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=5,
-        help="Max Loop B iterations (default: 5)",
-    )
-    run_req_parser.add_argument(
-        "--tasks-output-dir",
-        type=str,
-        default=None,
-        help="Directory for generated task YAML files",
-    )
-    run_req_parser.add_argument(
-        "--max-retries",
-        type=int,
-        default=3,
-        help="Max retries per task in Loop C (default: 3)",
-    )
-    run_req_parser.add_argument(
-        "--max-total-retries",
-        type=int,
-        default=10,
-        help="Max total retries in Loop C (default: 10)",
-    )
-    run_req_parser.add_argument(
-        "--cwd",
-        type=str,
-        default=None,
-        help="Working directory for Claude Code execution",
-    )
-    run_req_parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Model to use (e.g., claude-sonnet-4-20250514)",
-    )
-    run_req_parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        default=None,
-        help="Output file for results JSON",
-    )
-    run_req_parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    run_req_parser.add_argument(
-        "--no-web",
-        action="store_true",
-        help="Disable WebFetch and WebSearch tools",
-    )
-    run_req_parser.add_argument(
-        "--bypass-permissions",
-        action="store_true",
-        help="Use bypassPermissions mode (use with caution)",
-    )
-
-    # Resume command
+    # Resume command (unified for Loop C and Loop B)
     resume_parser = subparsers.add_parser(
         "resume", help="Resume execution from history"
     )
     resume_parser.add_argument("history_id", type=str, help="History ID to resume")
+    _add_loopb_flag(resume_parser)
+    _add_common_args(resume_parser)
+    # Loop C specific
     resume_parser.add_argument(
         "--from",
         dest="resume_from",
         type=str,
         default=None,
-        help="Resume point (e.g., task2_instruction, task3_validation). If not specified, resumes from where it stopped.",
-    )
-    resume_parser.add_argument(
-        "--output",
-        "-o",
-        type=str,
-        default=None,
-        help="Output file for results JSON",
-    )
-    resume_parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose logging",
-    )
-    resume_parser.add_argument(
-        "--cwd",
-        type=str,
-        default=None,
-        help="Working directory (overrides saved config)",
+        help="Resume point (e.g., task2_instruction, task3_validation). Loop C only.",
     )
 
     # History command
     history_parser = subparsers.add_parser("history", help="List execution history")
+    _add_loopb_flag(history_parser)
     history_parser.add_argument(
         "--all",
         action="store_true",
@@ -252,18 +200,6 @@ Example usage:
         help="Show details of a specific history entry",
     )
     history_parser.add_argument(
-        "--delete",
-        type=str,
-        default=None,
-        metavar="HISTORY_ID",
-        help="Delete a specific history entry",
-    )
-    history_parser.add_argument(
-        "--loopb",
-        action="store_true",
-        help="Show Loop B (requirements) history instead of Loop C",
-    )
-    history_parser.add_argument(
         "--loopb-children",
         type=str,
         default=None,
@@ -277,6 +213,36 @@ Example usage:
     return parser.parse_args()
 
 
+# =============================================================================
+# Config Builder
+# =============================================================================
+
+
+def build_orchestrator_config(args: argparse.Namespace) -> OrchestratorConfig:
+    """Build OrchestratorConfig from parsed arguments."""
+    cwd = args.cwd or str(Path.cwd())
+
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
+    if not args.no_web:
+        allowed_tools.extend(["WebFetch", "WebSearch"])
+
+    permission_mode = "bypassPermissions" if args.bypass_permissions else "acceptEdits"
+
+    return OrchestratorConfig(
+        max_retries_per_task=args.max_retries,
+        max_total_retries=args.max_total_retries,
+        cwd=cwd,
+        model=args.model,
+        allowed_tools=allowed_tools,
+        permission_mode=permission_mode,
+    )
+
+
+# =============================================================================
+# Output and Formatting
+# =============================================================================
+
+
 def print_dry_run(task_def: TaskDefinition, config: OrchestratorConfig) -> None:
     """Print dry run information."""
     print("=" * 70)
@@ -284,7 +250,6 @@ def print_dry_run(task_def: TaskDefinition, config: OrchestratorConfig) -> None:
     print("=" * 70)
     print()
 
-    # Config section
     print("## Configuration")
     print(f"  Working directory:    {config.cwd}")
     print(f"  Model:                {config.model or '(default)'}")
@@ -296,7 +261,6 @@ def print_dry_run(task_def: TaskDefinition, config: OrchestratorConfig) -> None:
         print("  WARNING: bypassPermissions allows all tools without prompts")
     print()
 
-    # Tasks section
     print(f"## Tasks ({len(task_def.tasks)} total)")
     print()
 
@@ -308,7 +272,6 @@ def print_dry_run(task_def: TaskDefinition, config: OrchestratorConfig) -> None:
             print(f"    Depends on: {', '.join(task.depends_on)}")
         print()
 
-        # Instruction prompt
         print("#### INSTRUCTION PROMPT:")
         print("```")
         instruction = build_instruction_prompt(task, cwd=config.cwd)
@@ -316,7 +279,6 @@ def print_dry_run(task_def: TaskDefinition, config: OrchestratorConfig) -> None:
         print("```")
         print()
 
-        # Validation prompt (with placeholder for instruction output)
         print("#### VALIDATION PROMPT (template):")
         print("```")
         validation = build_validation_prompt(task, "<instruction output will be here>")
@@ -371,7 +333,6 @@ def format_history_detail(history: ExecutionHistory) -> str:
     if history.error:
         lines.append(f"  Error:      {history.error}")
 
-    # Config snapshot
     cfg = history.config_snapshot
     if cfg:
         lines.append("")
@@ -379,10 +340,10 @@ def format_history_detail(history: ExecutionHistory) -> str:
         lines.append(f"  cwd:        {cfg.get('cwd', '(none)')}")
         lines.append(f"  model:      {cfg.get('model', '(default)')}")
         lines.append(
-            f"  retries:    {cfg.get('max_retries_per_task', 3)} per task, {cfg.get('max_total_retries', 10)} total"
+            f"  retries:    {cfg.get('max_retries_per_task', 3)} per task, "
+            f"{cfg.get('max_total_retries', 10)} total"
         )
 
-    # Task results
     lines.append("")
     lines.append("Task results:")
     if history.task_results:
@@ -394,12 +355,12 @@ def format_history_detail(history: ExecutionHistory) -> str:
                 else (f" - {tr.error}" if tr.error else "")
             )
             lines.append(
-                f"  {status_mark} {tr.task_id}: {tr.status.value} (attempts: {tr.attempts}){error_info}"
+                f"  {status_mark} {tr.task_id}: {tr.status.value} "
+                f"(attempts: {tr.attempts}){error_info}"
             )
     else:
         lines.append("  (none)")
 
-    # Resume points
     resume_points = history.get_resume_points()
     if resume_points and not history.completed:
         lines.append("")
@@ -410,13 +371,43 @@ def format_history_detail(history: ExecutionHistory) -> str:
     return "\n".join(lines)
 
 
-def _history_delete(history_manager: HistoryManager, history_id: str) -> int:
-    """Handle history delete subcommand."""
-    if history_manager.delete_history(history_id):
-        print(f"Deleted history: {history_id}")
-        return 0
-    logger.error(f"History not found: {history_id}")
-    return 1
+def output_results(
+    result: OrchestratorResult,
+    output_path: str | None,
+    extra_fields: dict[str, Any] | None = None,
+) -> None:
+    """Output orchestration results to file or stdout."""
+    result_dict: dict[str, Any] = {
+        "success": result.success,
+        "summary": result.summary,
+        "total_attempts": result.total_attempts,
+        "tasks": [
+            {
+                "task_id": tr.task_id,
+                "status": tr.status.value,
+                "attempts": tr.attempts,
+                "approved": tr.validation_approved,
+                "error": tr.error,
+            }
+            for tr in result.task_results
+        ],
+    }
+    if extra_fields:
+        result_dict.update(extra_fields)
+
+    if output_path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result_dict, f, indent=2, ensure_ascii=False)
+        logger.info(f"Results written to: {path}")
+    else:
+        print(json.dumps(result_dict, indent=2, ensure_ascii=False))
+
+
+# =============================================================================
+# History Command
+# =============================================================================
 
 
 def _history_show(
@@ -481,11 +472,14 @@ def history_command(args: argparse.Namespace) -> int:
 
     history_manager = HistoryManager(cwd)
 
-    if args.delete:
-        return _history_delete(history_manager, args.delete)
     if args.show:
         return _history_show(history_manager, args.show, args.json)
     return _history_list(history_manager, args.all, args.json)
+
+
+# =============================================================================
+# Resume Command (Loop C)
+# =============================================================================
 
 
 def _determine_resume_point(
@@ -508,40 +502,6 @@ def _determine_resume_point(
     return None
 
 
-def _output_results(
-    result: OrchestratorResult,
-    output_path: str | None,
-    extra_fields: dict[str, Any] | None = None,
-) -> None:
-    """Output orchestration results to file or stdout."""
-    result_dict: dict[str, Any] = {
-        "success": result.success,
-        "summary": result.summary,
-        "total_attempts": result.total_attempts,
-        "tasks": [
-            {
-                "task_id": tr.task_id,
-                "status": tr.status.value,
-                "attempts": tr.attempts,
-                "approved": tr.validation_approved,
-                "error": tr.error,
-            }
-            for tr in result.task_results
-        ],
-    }
-    if extra_fields:
-        result_dict.update(extra_fields)
-
-    if output_path:
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(result_dict, f, indent=2, ensure_ascii=False)
-        logger.info(f"Results written to: {path}")
-    else:
-        print(json.dumps(result_dict, indent=2, ensure_ascii=False))
-
-
 def _load_resumable_history(
     history_manager: HistoryManager, history_id: str
 ) -> ExecutionHistory | None:
@@ -560,26 +520,8 @@ def _load_resumable_history(
     return history
 
 
-def _get_resume_point_or_error(
-    args_resume_from: str | None,
-    history: ExecutionHistory,
-    task_def: TaskDefinition,
-) -> tuple[ResumePoint | None, str | None]:
-    """Get resume point, returning (point, error_msg). Either is None."""
-    try:
-        resume_point = _determine_resume_point(args_resume_from, history, task_def)
-    except ValueError as e:
-        return None, str(e)
-    if not resume_point:
-        return None, "Could not determine resume point."
-    return resume_point, None
-
-
-async def resume_command(args: argparse.Namespace) -> int:
-    """Execute the resume command."""
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
+async def resume_loopc(args: argparse.Namespace) -> int:
+    """Execute the resume command for Loop C."""
     cwd = args.cwd or str(Path.cwd())
     history_manager = HistoryManager(cwd)
 
@@ -588,11 +530,14 @@ async def resume_command(args: argparse.Namespace) -> int:
         return 1
 
     task_def = TaskDefinition.from_yaml(history.yaml_path)
-    resume_point, error_msg = _get_resume_point_or_error(
-        args.resume_from, history, task_def
-    )
-    if error_msg:
-        logger.error(error_msg)
+
+    try:
+        resume_point = _determine_resume_point(args.resume_from, history, task_def)
+    except ValueError as e:
+        logger.error(str(e))
+        return 1
+    if not resume_point:
+        logger.error("Could not determine resume point.")
         return 1
 
     logger.info(f"Resuming from: {resume_point}")
@@ -616,7 +561,7 @@ async def resume_command(args: argparse.Namespace) -> int:
         resume_history=history,
     )
 
-    _output_results(
+    output_results(
         result,
         args.output,
         {"resumed_from": str(resume_point), "history_id": history.history_id},
@@ -629,48 +574,37 @@ async def resume_command(args: argparse.Namespace) -> int:
     return 0 if result.success else 1
 
 
-async def run_command(args: argparse.Namespace) -> int:
-    """Execute the run command."""
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+# =============================================================================
+# Run Command (Loop C)
+# =============================================================================
 
-    yaml_path = Path(args.yaml_file)
+
+async def run_loopc(args: argparse.Namespace) -> int:
+    """Execute the run command for Loop C."""
+    yaml_path = Path(args.input_file)
     if not yaml_path.exists():
         logger.error(f"YAML file not found: {yaml_path}")
         return 1
+
+    config = build_orchestrator_config(args)
+
+    # Check for incomplete history to auto-resume
+    history_manager = HistoryManager(config.cwd)
+    existing = history_manager.find_incomplete_by_path(str(yaml_path))
+    if existing:
+        logger.info(f"Found incomplete execution: {existing.history_id}")
+        logger.info("Auto-resuming from previous state...")
+        args.history_id = existing.history_id
+        args.resume_from = None
+        return await resume_loopc(args)
 
     logger.info(f"Loading task definition from: {yaml_path}")
     task_def = TaskDefinition.from_yaml(str(yaml_path))
     logger.info(f"Loaded {len(task_def.tasks)} tasks")
 
-    # Default cwd to current directory if not specified
-    cwd = args.cwd or str(Path.cwd())
-
-    # Build allowed_tools list
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
-    if not args.no_web:
-        allowed_tools.extend(["WebFetch", "WebSearch"])
-
-    permission_mode = "bypassPermissions" if args.bypass_permissions else "acceptEdits"
-
-    config = OrchestratorConfig(
-        max_retries_per_task=args.max_retries,
-        max_total_retries=args.max_total_retries,
-        cwd=cwd,
-        model=args.model,
-        allowed_tools=allowed_tools,
-        permission_mode=permission_mode,
-    )
-
-    # Handle dry run
     if args.dry_run:
         print_dry_run(task_def, config)
         return 0
-
-    # Setup history manager
-    history_manager: HistoryManager | None = None
-    if not args.no_history:
-        history_manager = HistoryManager(cwd)
 
     logger.info("Starting orchestrator...")
     result = await run_orchestrator(
@@ -680,13 +614,75 @@ async def run_command(args: argparse.Namespace) -> int:
         history_manager=history_manager,
     )
 
-    _output_results(result, args.output)
+    output_results(result, args.output)
 
     if result.success:
         logger.info("All tasks completed successfully!")
         return 0
     logger.error(f"Orchestration failed: {result.summary}")
     return 1
+
+
+# =============================================================================
+# Unified Run/Resume Commands
+# =============================================================================
+
+
+def _detect_loop_type(args: argparse.Namespace) -> bool:
+    """Detect if this should run as Loop B. Returns True for Loop B."""
+    if args.loopb:
+        return True
+
+    yaml_path = Path(args.input_file)
+    if not yaml_path.exists():
+        return False
+
+    yaml_type = detect_yaml_type(str(yaml_path))
+    if yaml_type == YamlType.LOOP_B:
+        logger.info("Detected requirements file (Loop B mode)")
+        return True
+    if yaml_type == YamlType.LOOP_C:
+        logger.info("Detected task file (Loop C mode)")
+        return False
+
+    logger.warning("Could not detect YAML type, defaulting to Loop C")
+    return False
+
+
+async def run_command(args: argparse.Namespace) -> int:
+    """Execute the run command (dispatches to Loop B or Loop C)."""
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    is_loopb = _detect_loop_type(args)
+
+    if is_loopb:
+        from .cli_loopb import print_loopb_dry_run
+
+        if args.dry_run:
+            return print_loopb_dry_run(args)
+        result = await run_loopb_orchestrator(args)
+        return output_loopb_result(result, args)
+
+    return await run_loopc(args)
+
+
+async def resume_command(args: argparse.Namespace) -> int:
+    """Execute the resume command (dispatches to Loop B or Loop C)."""
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    if args.loopb:
+        from .cli_loopb import resume_loopb
+
+        return await resume_loopb(args)
+
+    return await resume_loopc(args)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
 
 
 def main() -> int:
@@ -698,8 +694,6 @@ def main() -> int:
         return 0
     if args.command == "run":
         return anyio.run(run_command, args)
-    if args.command == "run-requirements":
-        return anyio.run(run_requirements_command, args)
     if args.command == "history":
         return history_command(args)
     if args.command == "resume":

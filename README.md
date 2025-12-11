@@ -4,10 +4,16 @@ Claude Agent SDKを使用したマルチステップタスク自動化ツール�
 
 ## 2つの実行モード
 
-| モード | コマンド | 用途 |
-|--------|----------|------|
-| Loop C | `task-orchestrator run tasks.yaml` | タスク定義ファイルを順次実行 |
-| Loop B | `task-orchestrator run-requirements requirements.yaml` | 要件定義から自動でタスク生成・実行・検証を繰り返す |
+| モード | 用途 |
+|--------|------|
+| Loop C | タスク定義ファイルを順次実行 |
+| Loop B | 要件定義から自動でタスク生成・実行・検証を繰り返す |
+
+**ファイル内容から自動判定**されるため、コマンドは共通:
+
+```bash
+task-orchestrator run <file.yaml>
+```
 
 ## クイックスタート
 
@@ -54,19 +60,19 @@ task-orchestrator run tasks.yaml
 # requirements.yaml
 requirements:
   - id: req_1
-    description: ユーザー認証機能を実装する
+    name: ユーザー認証機能を実装する
     acceptance_criteria:
       - ログイン/ログアウトが動作する
       - パスワードがハッシュ化されて保存される
 
   - id: req_2
-    description: テストカバレッジ80%以上
+    name: テストカバレッジ80%以上
     acceptance_criteria:
       - pytest --cov でカバレッジ80%以上
 ```
 
 ```bash
-task-orchestrator run-requirements requirements.yaml
+task-orchestrator run requirements.yaml
 ```
 
 Loop Bは以下のサイクルを自動で繰り返す：
@@ -93,48 +99,32 @@ uv pip install -e .
 
 ## コマンド
 
-### Loop C (タスク実行)
+### 基本コマンド
 
 ```bash
-# タスク実行
-task-orchestrator run tasks.yaml
+# タスク/要件ファイルを実行（ファイル内容で自動判定）
+task-orchestrator run <file.yaml>
 
-# dry-run (プロンプト確認のみ)
-task-orchestrator run tasks.yaml --dry-run
+# dry-run（実行フローとプロンプトを確認）
+task-orchestrator run <file.yaml> --dry-run
 
 # サンプルYAML生成
 task-orchestrator sample > /tmp/tasks.yaml
 ```
 
-### Loop B (要件駆動実行)
-
-```bash
-# 要件定義から実行
-task-orchestrator run-requirements requirements.yaml
-
-# イテレーション上限を指定
-task-orchestrator run-requirements requirements.yaml --max-iterations 5
-```
-
-### 共通オプション
-
-| オプション | 説明 | 対象 |
-|-----------|------|------|
-| `--max-retries N` | タスクあたりの最大リトライ回数 (default: 3) | run, run-requirements |
-| `--max-total-retries N` | 全体の最大リトライ回数 (default: 10) | run, run-requirements |
-| `--cwd PATH` | 作業ディレクトリ | 全コマンド |
-| `--model MODEL` | 使用モデル | run, run-requirements |
-| `--no-web` | WebFetch/WebSearch無効化 | run, run-requirements |
-| `--bypass-permissions` | 全ツール自動承認 (要注意) | run, run-requirements |
-| `--dry-run` | 実行せずプロンプト表示 | run |
-| `-o FILE` | 結果JSONの出力先 | run, run-requirements |
-
-### Loop B専用オプション
+### オプション
 
 | オプション | 説明 |
 |-----------|------|
-| `--max-iterations N` | 最大イテレーション回数 (default: 5) |
-| `--tasks-output-dir DIR` | 生成タスクYAMLの保存先 |
+| `--loopb` | 強制的にLoop Bモードで実行（通常は自動判定） |
+| `--max-retries N` | タスクあたりの最大リトライ回数 (default: 3) |
+| `--max-total-retries N` | 全体の最大リトライ回数 (default: 10) |
+| `--cwd PATH` | 作業ディレクトリ |
+| `--model MODEL` | 使用モデル |
+| `--no-web` | WebFetch/WebSearch無効化 |
+| `--bypass-permissions` | 全ツール自動承認 (要注意) |
+| `-o FILE` | 結果JSONの出力先 |
+| `--dry-run` | 実行フローとプロンプトを表示（実行しない） |
 
 ## フロー制御
 
@@ -148,52 +138,71 @@ permission_denied → 即終了 (リトライなし)
 
 ## 履歴管理・途中再開
 
-実行履歴は `.task-orchestrator-history/` に自動保存され、失敗時に途中から再開できる。
+実行履歴は `.task-orchestrator-history/` に自動保存される。
 
-### Loop C履歴
+### 自動resume
+
+**同じファイルを再度 `run` すると、未完了の実行があれば自動的に途中から再開する：**
+
+```bash
+# 初回実行（途中で中断）
+task-orchestrator run tasks.yaml
+
+# 再度実行 → 自動的に途中から再開
+task-orchestrator run tasks.yaml
+```
+
+### 手動でのresume
 
 ```bash
 # 未完了の履歴一覧
 task-orchestrator history
 
-# 途中から再開
+# 履歴IDを指定して再開
 task-orchestrator resume <history_id>
 
-# 特定ポイントから再開
+# 特定ポイントから再開（Loop Cのみ）
 task-orchestrator resume <history_id> --from task2_validation
+
+# Loop Bの再開
+task-orchestrator resume <history_id> --loopb
 ```
 
-再開ポイントは `<task_id>_instruction` または `<task_id>_validation` の形式。
+再開ポイント（Loop C）は `<task_id>_instruction` または `<task_id>_validation` の形式。
 
-### Loop B履歴
+### 履歴操作
 
 ```bash
-# Loop B履歴一覧
-task-orchestrator history --loopb
+# 全履歴一覧（完了済み含む）
+task-orchestrator history --all
+task-orchestrator history --loopb --all
 
 # 詳細表示
+task-orchestrator history --show <history_id>
 task-orchestrator history --loopb --show <loopb_history_id>
 
 # 紐づくLoop C履歴を表示
 task-orchestrator history --loopb-children <loopb_history_id>
 ```
 
-### その他の履歴操作
+### 履歴ファイルの削除
+
+履歴は以下の構造で保存される:
+```
+.task-orchestrator-history/
+├── <history_id>.json          # Loop C履歴
+└── loopb/
+    ├── <history_id>.json      # Loop B履歴
+    └── tasks/                 # 生成されたタスクYAML
+```
 
 ```bash
-# 全履歴一覧
-task-orchestrator history --all
-task-orchestrator history --loopb --all
+# 特定の履歴を削除
+rm .task-orchestrator-history/<history_id>.json
+rm .task-orchestrator-history/loopb/<history_id>.json
 
-# 詳細表示
-task-orchestrator history --show <history_id>
-
-# 履歴削除
-task-orchestrator history --delete <history_id>
-task-orchestrator history --loopb --delete <loopb_history_id>
-
-# 履歴無効化
-task-orchestrator run tasks.yaml --no-history
+# 全履歴クリア（新規実行したい場合）
+rm -rf .task-orchestrator-history
 ```
 
 ## Permission Mode

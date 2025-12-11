@@ -227,6 +227,30 @@ class ExecutionHistory:
         return unique_points
 
 
+class YamlType(Enum):
+    """Type of YAML file."""
+
+    LOOP_C = "loop_c"  # Task definition
+    LOOP_B = "loop_b"  # Requirement definition
+    UNKNOWN = "unknown"
+
+
+def detect_yaml_type(yaml_path: str) -> YamlType:
+    """Detect whether YAML file is Loop C (tasks) or Loop B (requirements)."""
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+
+    if not isinstance(data, dict):
+        return YamlType.UNKNOWN
+
+    if "tasks" in data:
+        return YamlType.LOOP_C
+    if "requirements" in data:
+        return YamlType.LOOP_B
+
+    return YamlType.UNKNOWN
+
+
 def create_sample_task_yaml() -> str:
     """Return sample YAML content for reference."""
     return """# Task Orchestrator Definition

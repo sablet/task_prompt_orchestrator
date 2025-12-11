@@ -3,11 +3,11 @@
 import argparse
 import json
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from .orchestrator import HistoryManager, OrchestratorConfig
+from .prompts import build_task_generation_prompt
 from .requirements_orchestrator import (
     LoopBHistoryManager,
     RequirementsOrchestrator,
@@ -20,6 +20,119 @@ from .schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Dry Run
+# =============================================================================
+
+_LOOPB_FLOW_DIAGRAM = """\
+  ┌─────────────────────────────────────────────────────────────┐
+  │  1. TASK GENERATION                                        │
+  │     LLM generates tasks from requirements                  │
+  │     Output: tasks YAML file                                │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │  2. LOOP C EXECUTION                                       │
+  │     For each generated task:                               │
+  │       instruction → validation → approved/retry            │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+  ┌─────────────────────────────────────────────────────────────┐
+  │  3. REQUIREMENTS VERIFICATION                              │
+  │     LLM checks if all acceptance criteria are met          │
+  └─────────────────────────────────────────────────────────────┘
+                              ↓
+          ┌──────────────────────────────────────┐
+          │  All requirements met?               │
+          │    YES → DONE                        │
+          │    NO  → Generate additional tasks   │
+          │          (back to step 1)            │
+          └──────────────────────────────────────┘
+"""
+
+
+DEFAULT_MAX_ITERATIONS = 3
+
+
+def _print_loopb_config(
+    requirements_path: Path, cwd: str, args: argparse.Namespace
+) -> None:
+    """Print Loop B configuration section."""
+    print("## Configuration")
+    print(f"  Requirements file:  {requirements_path}")
+    print(f"  Working directory:  {cwd}")
+    print(f"  Max iterations:     {DEFAULT_MAX_ITERATIONS}")
+    print(f"  Max retries/task:   {args.max_retries}")
+    print(f"  Max total retries:  {args.max_total_retries}")
+    web_status = "disabled" if args.no_web else "enabled"
+    perm_mode = "bypassPermissions" if args.bypass_permissions else "acceptEdits"
+    print(f"  Web tools:          {web_status}")
+    print(f"  Permission mode:    {perm_mode}")
+    print()
+
+
+def _print_loopb_requirements(requirements: RequirementDefinition) -> None:
+    """Print requirements section."""
+    print(f"## Requirements ({len(requirements.requirements)} total)")
+    print()
+    for req in requirements.requirements:
+        print(f"### {req.id}: {req.name}")
+        print("  Acceptance Criteria:")
+        for i, criterion in enumerate(req.acceptance_criteria, 1):
+            print(f"    {req.id}.{i}: {criterion}")
+        print()
+
+
+def print_loopb_dry_run(args: argparse.Namespace) -> int:
+    """Print dry run information for Loop B."""
+    requirements_path = Path(args.input_file)
+    if not requirements_path.exists():
+        logger.error(f"Requirements file not found: {requirements_path}")
+        return 1
+
+    requirements = RequirementDefinition.from_yaml(str(requirements_path))
+    cwd = args.cwd or str(Path.cwd())
+
+    print("=" * 70)
+    print("DRY RUN - Loop B (Requirements-Driven Execution)")
+    print("=" * 70)
+    print()
+
+    _print_loopb_config(requirements_path, cwd, args)
+    _print_loopb_requirements(requirements)
+
+    print("=" * 70)
+    print("## Execution Flow Preview")
+    print("=" * 70)
+    print()
+    print(f"Loop B will iterate up to {DEFAULT_MAX_ITERATIONS} times:")
+    print()
+    print(_LOOPB_FLOW_DIAGRAM)
+
+    print("=" * 70)
+    print("## Task Generation Prompt (iteration 1)")
+    print("=" * 70)
+    print()
+    prompt = build_task_generation_prompt(requirements)
+    if len(prompt) > 2000:
+        print(prompt[:2000])
+        print(f"\n... (truncated, total {len(prompt)} chars)")
+    else:
+        print(prompt)
+    print()
+
+    print("=" * 70)
+    print("END DRY RUN")
+    print("=" * 70)
+
+    return 0
+
+
+# =============================================================================
+# History Formatting
+# =============================================================================
 
 
 def format_loopb_history_summary(history: LoopBExecutionHistory) -> str:
@@ -62,7 +175,6 @@ def format_loopb_history_detail(history: LoopBExecutionHistory) -> str:
     if history.error:
         lines.append(f"  Error:        {history.error}")
 
-    # Iterations
     lines.append("")
     lines.append("Iterations:")
     if history.iterations:
@@ -81,14 +193,12 @@ def format_loopb_history_detail(history: LoopBExecutionHistory) -> str:
     else:
         lines.append("  (none)")
 
-    # Loop C histories
     if history.loop_c_history_ids:
         lines.append("")
         lines.append("Loop C histories:")
         for hid in history.loop_c_history_ids:
             lines.append(f"  - {hid}")
 
-    # Completed tasks
     if history.completed_task_ids:
         lines.append("")
         lines.append(f"Completed tasks ({len(history.completed_task_ids)}):")
@@ -100,15 +210,9 @@ def format_loopb_history_detail(history: LoopBExecutionHistory) -> str:
     return "\n".join(lines)
 
 
-def handle_loopb_history_delete(
-    args: argparse.Namespace, history_manager: LoopBHistoryManager
-) -> int:
-    """Handle 'history --loopb --delete' subcommand."""
-    if history_manager.delete_history(args.delete):
-        print(f"Deleted Loop B history: {args.delete}")
-        return 0
-    logger.error(f"Loop B history not found: {args.delete}")
-    return 1
+# =============================================================================
+# History Command Handlers
+# =============================================================================
 
 
 def handle_loopb_history_show(
@@ -125,6 +229,10 @@ def handle_loopb_history_show(
         print(json.dumps(history.to_dict(), indent=2, ensure_ascii=False))
     else:
         print(format_loopb_history_detail(history))
+        if history.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}:
+            print()
+            print("To resume, use:")
+            print(f"  task-orchestrator resume {history.history_id} --loopb")
     return 0
 
 
@@ -168,7 +276,7 @@ def handle_loopb_children(
     args: argparse.Namespace,
     loopb_manager: LoopBHistoryManager,
     loopc_manager: HistoryManager,
-    format_loopc_summary: Callable[[Any], str],
+    format_loopc_summary: Any,
 ) -> int:
     """Handle 'history --loopb-children' subcommand."""
     try:
@@ -193,7 +301,7 @@ def handle_loopb_children(
 
 
 def handle_loopb_history(
-    args: argparse.Namespace, cwd: str, format_loopc_summary: Callable[[Any], str]
+    args: argparse.Namespace, cwd: str, format_loopc_summary: Any
 ) -> int:
     """Handle Loop B history subcommands."""
     loopb_manager = LoopBHistoryManager(cwd)
@@ -204,13 +312,15 @@ def handle_loopb_history(
             args, loopb_manager, loopc_manager, format_loopc_summary
         )
 
-    if args.delete:
-        return handle_loopb_history_delete(args, loopb_manager)
-
     if args.show:
         return handle_loopb_history_show(args, loopb_manager)
 
     return handle_loopb_history_list(args, loopb_manager)
+
+
+# =============================================================================
+# Result Output
+# =============================================================================
 
 
 def build_loopb_result_dict(history: LoopBExecutionHistory) -> dict[str, object]:
@@ -251,20 +361,13 @@ def output_loopb_result(
     return 1
 
 
-async def run_requirements_command(args: argparse.Namespace) -> int:
-    """Execute the run-requirements command (Loop B)."""
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
+# =============================================================================
+# Run Loop B
+# =============================================================================
 
-    requirements_path = Path(args.requirements_file)
-    if not requirements_path.exists():
-        logger.error(f"Requirements file not found: {requirements_path}")
-        return 1
 
-    logger.info(f"Loading requirements from: {requirements_path}")
-    requirements = RequirementDefinition.from_yaml(str(requirements_path))
-    logger.info(f"Loaded {len(requirements.requirements)} requirements")
-
+def _build_loopb_config(args: argparse.Namespace) -> RequirementsOrchestratorConfig:
+    """Build RequirementsOrchestratorConfig from parsed arguments."""
     cwd = args.cwd or str(Path.cwd())
 
     allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
@@ -282,13 +385,41 @@ async def run_requirements_command(args: argparse.Namespace) -> int:
         permission_mode=permission_mode,
     )
 
-    config = RequirementsOrchestratorConfig(
-        max_iterations=args.max_iterations,
-        tasks_output_dir=args.tasks_output_dir,
+    return RequirementsOrchestratorConfig(
+        max_iterations=DEFAULT_MAX_ITERATIONS,
         orchestrator_config=orchestrator_config,
     )
 
+
+async def run_loopb_orchestrator(args: argparse.Namespace) -> LoopBExecutionHistory:
+    """Execute Loop B orchestration and return history."""
+    requirements_path = Path(args.input_file)
+    if not requirements_path.exists():
+        raise FileNotFoundError(f"Requirements file not found: {requirements_path}")
+
+    cwd = args.cwd or str(Path.cwd())
     history_manager = LoopBHistoryManager(cwd)
+
+    # Check for incomplete history to auto-resume
+    existing = history_manager.find_incomplete_by_path(str(requirements_path))
+    if existing:
+        logger.info(f"Found incomplete Loop B execution: {existing.history_id}")
+        logger.info("Auto-resuming from previous state...")
+        requirements = RequirementDefinition.from_yaml(str(requirements_path))
+        config = _build_loopb_config(args)
+        orchestrator = RequirementsOrchestrator(
+            requirements=requirements,
+            config=config,
+            history_manager=history_manager,
+            requirements_path=str(requirements_path),
+        )
+        return await orchestrator.resume(existing)
+
+    logger.info(f"Loading requirements from: {requirements_path}")
+    requirements = RequirementDefinition.from_yaml(str(requirements_path))
+    logger.info(f"Loaded {len(requirements.requirements)} requirements")
+
+    config = _build_loopb_config(args)
 
     orchestrator = RequirementsOrchestrator(
         requirements=requirements,
@@ -298,6 +429,84 @@ async def run_requirements_command(args: argparse.Namespace) -> int:
     )
 
     logger.info("Starting Loop B orchestrator...")
-    result = await orchestrator.run()
+    return await orchestrator.run()
+
+
+# =============================================================================
+# Resume Loop B
+# =============================================================================
+
+
+def _load_resumable_loopb_history(
+    history_manager: LoopBHistoryManager, history_id: str
+) -> LoopBExecutionHistory | None:
+    """Load Loop B history and validate it can be resumed."""
+    try:
+        history = history_manager.load_history(history_id)
+    except FileNotFoundError:
+        logger.error(f"Loop B history not found: {history_id}")
+        return None
+
+    if history.status == LoopBStatus.COMPLETED:
+        logger.error(f"Loop B history {history_id} is already completed.")
+        return None
+
+    if history.status == LoopBStatus.FAILED:
+        logger.warning(f"Loop B history {history_id} was failed, attempting to resume.")
+
+    if not Path(history.requirements_path).exists():
+        logger.error(f"Requirements file not found: {history.requirements_path}")
+        return None
+
+    return history
+
+
+async def resume_loopb(args: argparse.Namespace) -> int:
+    """Resume Loop B execution from history."""
+    cwd = args.cwd or str(Path.cwd())
+    history_manager = LoopBHistoryManager(cwd)
+
+    history = _load_resumable_loopb_history(history_manager, args.history_id)
+    if not history:
+        return 1
+
+    logger.info(f"Resuming Loop B from: {history.history_id}")
+    logger.info(f"  Status: {history.status.value}")
+    logger.info(f"  Iteration: {history.current_iteration}/{history.max_iterations}")
+
+    # Load requirements
+    requirements = RequirementDefinition.from_yaml(history.requirements_path)
+
+    # Build config (use saved config where possible, allow overrides)
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
+    if not args.no_web:
+        allowed_tools.extend(["WebFetch", "WebSearch"])
+
+    permission_mode = "bypassPermissions" if args.bypass_permissions else "acceptEdits"
+
+    orchestrator_config = OrchestratorConfig(
+        max_retries_per_task=3,  # Use defaults for resume
+        max_total_retries=10,
+        cwd=args.cwd or cwd,
+        model=args.model,
+        allowed_tools=allowed_tools,
+        permission_mode=permission_mode,
+    )
+
+    config = RequirementsOrchestratorConfig(
+        max_iterations=history.max_iterations,
+        tasks_output_dir=history.tasks_output_dir,
+        orchestrator_config=orchestrator_config,
+    )
+
+    orchestrator = RequirementsOrchestrator(
+        requirements=requirements,
+        config=config,
+        history_manager=history_manager,
+        requirements_path=history.requirements_path,
+    )
+
+    # Resume from existing history
+    result = await orchestrator.resume(history)
 
     return output_loopb_result(result, args)

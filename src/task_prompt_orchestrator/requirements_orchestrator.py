@@ -126,6 +126,16 @@ class LoopBHistoryManager:
             if h.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
         ]
 
+    def find_incomplete_by_path(
+        self, requirements_path: str
+    ) -> LoopBExecutionHistory | None:
+        """Find incomplete history for a given requirements file path."""
+        resolved_path = str(Path(requirements_path).resolve())
+        for h in self.list_incomplete_histories():
+            if h.requirements_path == resolved_path:
+                return h
+        return None
+
     def delete_history(self, history_id: str) -> bool:
         """Delete a history file."""
         return delete_history_file(self.history_dir, history_id)
@@ -151,11 +161,23 @@ class RequirementsOrchestrator:
         self.loop_c_history_manager: HistoryManager | None = None
 
     async def run(self) -> LoopBExecutionHistory:
-        """Execute the Loop B orchestration."""
-        self._initialize()
-        assert self.history is not None  # Set by _initialize()
+        """Execute the Loop B orchestration from the beginning."""
+        self._initialize_new()
+        return await self._run_loop()
 
-        for iteration in range(self.config.max_iterations):
+    async def resume(
+        self, existing_history: LoopBExecutionHistory
+    ) -> LoopBExecutionHistory:
+        """Resume Loop B orchestration from existing history."""
+        self._initialize_from_history(existing_history)
+        return await self._run_loop()
+
+    async def _run_loop(self) -> LoopBExecutionHistory:
+        """Execute the main Loop B iteration loop."""
+        assert self.history is not None
+
+        start_iteration = self.history.current_iteration
+        for iteration in range(start_iteration, self.config.max_iterations):
             self.history.current_iteration = iteration + 1
             self._save_history()
 
@@ -225,18 +247,16 @@ class RequirementsOrchestrator:
 
         return self.history
 
-    def _initialize(self) -> None:
-        """Initialize history and state."""
+    def _initialize_new(self) -> None:
+        """Initialize new history and state for fresh run."""
         if self.history_manager and self.requirements_path:
             self.history = self.history_manager.create_history(
                 self.requirements_path, self.config
             )
-            # Initialize Loop C history manager in same base dir
             self.loop_c_history_manager = HistoryManager(
                 str(self.history_manager.base_dir)
             )
         else:
-            # Create in-memory history
             now = datetime.now().isoformat()
             tasks_output_dir = self.config.tasks_output_dir or "generated"
             self.history = LoopBExecutionHistory(
@@ -252,6 +272,59 @@ class RequirementsOrchestrator:
                 completed_task_ids=[],
                 loop_c_history_ids=[],
             )
+
+    def _initialize_from_history(self, existing_history: LoopBExecutionHistory) -> None:
+        """Initialize state from existing history for resume."""
+        self.history = existing_history
+
+        # Clear error if resuming from failed state
+        if self.history.status == LoopBStatus.FAILED:
+            self.history.error = None
+
+        # Initialize Loop C history manager
+        if self.history_manager:
+            self.loop_c_history_manager = HistoryManager(
+                str(self.history_manager.base_dir)
+            )
+
+        # Restore completed tasks from previous iterations
+        self._restore_completed_tasks_from_history()
+
+        logger.info(
+            f"Resumed from iteration {self.history.current_iteration}, "
+            f"{len(self.all_completed_tasks)} completed tasks restored"
+        )
+
+    def _restore_completed_tasks_from_history(self) -> None:
+        """Restore completed tasks and results from history iterations."""
+        assert self.history is not None
+
+        for iteration in self.history.iterations:
+            tasks_yaml_path = iteration.tasks_yaml_path
+            if not Path(tasks_yaml_path).exists():
+                logger.warning(f"Tasks YAML not found: {tasks_yaml_path}")
+                continue
+
+            task_def = TaskDefinition.from_yaml(tasks_yaml_path)
+            task_map = {t.id: t for t in task_def.tasks}
+
+            # Restore completed tasks
+            for task_id in self.history.completed_task_ids:
+                if task_id in task_map:
+                    task = task_map[task_id]
+                    if task not in self.all_completed_tasks:
+                        self.all_completed_tasks.append(task)
+
+            # Create placeholder TaskResults for approved tasks
+            for task_id in self.history.completed_task_ids:
+                if not any(r.task_id == task_id for r in self.all_task_results):
+                    self.all_task_results.append(
+                        TaskResult(
+                            task_id=task_id,
+                            status=TaskStatus.APPROVED,
+                            validation_approved=True,
+                        )
+                    )
 
     def _save_history(self) -> None:
         """Save history if manager is available."""
@@ -277,6 +350,8 @@ class RequirementsOrchestrator:
     ) -> list[Task]:
         """Generate tasks and retry if coverage is incomplete."""
         coverage_feedback: str | None = None
+        tasks: list[Task] = []
+        uncovered: list[str] = []
 
         for attempt in range(max_retries):
             tasks = await self._generate_tasks(iteration, coverage_feedback)
