@@ -5,6 +5,7 @@ import json
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 import anyio
 
@@ -22,6 +23,7 @@ from .orchestrator import (
 from .schema import (
     ExecutionHistory,
     ExecutionPhase,
+    OrchestratorResult,
     ResumePoint,
     TaskDefinition,
     create_sample_task_yaml,
@@ -408,69 +410,169 @@ def format_history_detail(history: ExecutionHistory) -> str:
     return "\n".join(lines)
 
 
-def history_command(args: argparse.Namespace) -> int:
-    """Execute the history command."""
-    cwd = args.cwd or str(Path.cwd())
-
-    # Handle Loop B history
-    if args.loopb or args.loopb_children:
-        return handle_loopb_history(args, cwd, format_history_summary)
-
-    history_manager = HistoryManager(cwd)
-
-    # Handle delete
-    if args.delete:
-        if history_manager.delete_history(args.delete):
-            print(f"Deleted history: {args.delete}")
-            return 0
-        logger.error(f"History not found: {args.delete}")
-        return 1
-
-    # Handle show single entry
-    if args.show:
-        try:
-            history = history_manager.load_history(args.show)
-            if args.json:
-                print(json.dumps(history.to_dict(), indent=2, ensure_ascii=False))
-            else:
-                print(format_history_detail(history))
-                if not history.completed:
-                    print()
-                    print("To resume, use:")
-                    print(f"  task-orchestrator resume {history.history_id}")
-            return 0
-        except FileNotFoundError:
-            logger.error(f"History not found: {args.show}")
-            return 1
-
-    # List histories
-    if args.all:
-        histories = history_manager.list_histories()
-    else:
-        histories = history_manager.list_incomplete_histories()
-
-    if not histories:
-        if args.all:
-            print("No execution history found.")
-        else:
-            print("No incomplete executions found. Use --all to show completed ones.")
+def _history_delete(history_manager: HistoryManager, history_id: str) -> int:
+    """Handle history delete subcommand."""
+    if history_manager.delete_history(history_id):
+        print(f"Deleted history: {history_id}")
         return 0
+    logger.error(f"History not found: {history_id}")
+    return 1
 
-    if args.json:
+
+def _history_show(
+    history_manager: HistoryManager, history_id: str, as_json: bool
+) -> int:
+    """Handle history show subcommand."""
+    try:
+        history = history_manager.load_history(history_id)
+    except FileNotFoundError:
+        logger.error(f"History not found: {history_id}")
+        return 1
+    if as_json:
+        print(json.dumps(history.to_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(format_history_detail(history))
+        if not history.completed:
+            print()
+            print("To resume, use:")
+            print(f"  task-orchestrator resume {history.history_id}")
+    return 0
+
+
+def _history_list(
+    history_manager: HistoryManager, show_all: bool, as_json: bool
+) -> int:
+    """Handle history list subcommand."""
+    histories = (
+        history_manager.list_histories()
+        if show_all
+        else history_manager.list_incomplete_histories()
+    )
+    if not histories:
+        msg = (
+            "No execution history found."
+            if show_all
+            else "No incomplete executions found. Use --all to show completed ones."
+        )
+        print(msg)
+        return 0
+    if as_json:
         print(
             json.dumps([h.to_dict() for h in histories], indent=2, ensure_ascii=False)
         )
     else:
         title = (
             "All execution history:"
-            if args.all
+            if show_all
             else "Incomplete executions (resumable):"
         )
         print(title)
         for history in histories:
             print(format_history_summary(history))
-
     return 0
+
+
+def history_command(args: argparse.Namespace) -> int:
+    """Execute the history command."""
+    cwd = args.cwd or str(Path.cwd())
+
+    if args.loopb or args.loopb_children:
+        return handle_loopb_history(args, cwd, format_history_summary)
+
+    history_manager = HistoryManager(cwd)
+
+    if args.delete:
+        return _history_delete(history_manager, args.delete)
+    if args.show:
+        return _history_show(history_manager, args.show, args.json)
+    return _history_list(history_manager, args.all, args.json)
+
+
+def _determine_resume_point(
+    args_resume_from: str | None,
+    history: ExecutionHistory,
+    task_def: TaskDefinition,
+) -> ResumePoint | None:
+    """Determine resume point from args, history, or task definition."""
+    if args_resume_from:
+        return ResumePoint.parse(args_resume_from)
+    if history.current_task_id and history.current_phase:
+        return ResumePoint(
+            task_id=history.current_task_id,
+            phase=ExecutionPhase(history.current_phase),
+        )
+    approved_ids = set(history.completed_task_ids)
+    for task in task_def.tasks:
+        if task.id not in approved_ids:
+            return ResumePoint(task_id=task.id, phase=ExecutionPhase.INSTRUCTION)
+    return None
+
+
+def _output_results(
+    result: OrchestratorResult,
+    output_path: str | None,
+    extra_fields: dict[str, Any] | None = None,
+) -> None:
+    """Output orchestration results to file or stdout."""
+    result_dict: dict[str, Any] = {
+        "success": result.success,
+        "summary": result.summary,
+        "total_attempts": result.total_attempts,
+        "tasks": [
+            {
+                "task_id": tr.task_id,
+                "status": tr.status.value,
+                "attempts": tr.attempts,
+                "approved": tr.validation_approved,
+                "error": tr.error,
+            }
+            for tr in result.task_results
+        ],
+    }
+    if extra_fields:
+        result_dict.update(extra_fields)
+
+    if output_path:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(result_dict, f, indent=2, ensure_ascii=False)
+        logger.info(f"Results written to: {path}")
+    else:
+        print(json.dumps(result_dict, indent=2, ensure_ascii=False))
+
+
+def _load_resumable_history(
+    history_manager: HistoryManager, history_id: str
+) -> ExecutionHistory | None:
+    """Load history and validate it can be resumed. Returns None on error."""
+    try:
+        history = history_manager.load_history(history_id)
+    except FileNotFoundError:
+        logger.error(f"History not found: {history_id}")
+        return None
+    if history.completed:
+        logger.error(f"History {history_id} is already completed.")
+        return None
+    if not Path(history.yaml_path).exists():
+        logger.error(f"YAML file not found: {history.yaml_path}")
+        return None
+    return history
+
+
+def _get_resume_point_or_error(
+    args_resume_from: str | None,
+    history: ExecutionHistory,
+    task_def: TaskDefinition,
+) -> tuple[ResumePoint | None, str | None]:
+    """Get resume point, returning (point, error_msg). Either is None."""
+    try:
+        resume_point = _determine_resume_point(args_resume_from, history, task_def)
+    except ValueError as e:
+        return None, str(e)
+    if not resume_point:
+        return None, "Could not determine resume point."
+    return resume_point, None
 
 
 async def resume_command(args: argparse.Namespace) -> int:
@@ -481,59 +583,20 @@ async def resume_command(args: argparse.Namespace) -> int:
     cwd = args.cwd or str(Path.cwd())
     history_manager = HistoryManager(cwd)
 
-    try:
-        history = history_manager.load_history(args.history_id)
-    except FileNotFoundError:
-        logger.error(f"History not found: {args.history_id}")
+    history = _load_resumable_history(history_manager, args.history_id)
+    if not history:
         return 1
 
-    if history.completed:
-        logger.error(
-            f"History {args.history_id} is already completed. Nothing to resume."
-        )
-        return 1
-
-    # Load task definition
-    yaml_path = history.yaml_path
-    if not Path(yaml_path).exists():
-        logger.error(f"YAML file not found: {yaml_path}")
-        return 1
-
-    task_def = TaskDefinition.from_yaml(yaml_path)
-
-    # Determine resume point
-    resume_point: ResumePoint | None = None
-    if args.resume_from:
-        try:
-            resume_point = ResumePoint.parse(args.resume_from)
-        except ValueError as e:
-            logger.error(str(e))
-            return 1
-    else:
-        # Auto-determine resume point from history
-        if history.current_task_id and history.current_phase:
-            resume_point = ResumePoint(
-                task_id=history.current_task_id,
-                phase=ExecutionPhase(history.current_phase),
-            )
-        else:
-            # Find the first non-approved task
-            approved_ids = set(history.completed_task_ids)
-            for task in task_def.tasks:
-                if task.id not in approved_ids:
-                    resume_point = ResumePoint(
-                        task_id=task.id,
-                        phase=ExecutionPhase.INSTRUCTION,
-                    )
-                    break
-
-    if not resume_point:
-        logger.error("Could not determine resume point.")
+    task_def = TaskDefinition.from_yaml(history.yaml_path)
+    resume_point, error_msg = _get_resume_point_or_error(
+        args.resume_from, history, task_def
+    )
+    if error_msg:
+        logger.error(error_msg)
         return 1
 
     logger.info(f"Resuming from: {resume_point}")
 
-    # Restore config from history
     saved_config = history.config_snapshot
     config = OrchestratorConfig(
         max_retries_per_task=saved_config.get("max_retries_per_task", 3),
@@ -547,45 +610,23 @@ async def resume_command(args: argparse.Namespace) -> int:
     result = await run_orchestrator(
         task_def,
         config,
-        yaml_path=yaml_path,
+        yaml_path=history.yaml_path,
         history_manager=history_manager,
         resume_point=resume_point,
         resume_history=history,
     )
 
-    # Output results
-    result_dict = {
-        "success": result.success,
-        "summary": result.summary,
-        "total_attempts": result.total_attempts,
-        "resumed_from": str(resume_point),
-        "history_id": history.history_id,
-        "tasks": [
-            {
-                "task_id": tr.task_id,
-                "status": tr.status.value,
-                "attempts": tr.attempts,
-                "approved": tr.validation_approved,
-                "error": tr.error,
-            }
-            for tr in result.task_results
-        ],
-    }
-
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result_dict, f, indent=2, ensure_ascii=False)
-        logger.info(f"Results written to: {output_path}")
-    else:
-        print(json.dumps(result_dict, indent=2, ensure_ascii=False))
+    _output_results(
+        result,
+        args.output,
+        {"resumed_from": str(resume_point), "history_id": history.history_id},
+    )
 
     if result.success:
         logger.info("All tasks completed successfully!")
-        return 0
-    logger.error(f"Orchestration failed: {result.summary}")
-    return 1
+    else:
+        logger.error(f"Orchestration failed: {result.summary}")
+    return 0 if result.success else 1
 
 
 async def run_command(args: argparse.Namespace) -> int:
@@ -639,31 +680,7 @@ async def run_command(args: argparse.Namespace) -> int:
         history_manager=history_manager,
     )
 
-    # Output results
-    result_dict = {
-        "success": result.success,
-        "summary": result.summary,
-        "total_attempts": result.total_attempts,
-        "tasks": [
-            {
-                "task_id": tr.task_id,
-                "status": tr.status.value,
-                "attempts": tr.attempts,
-                "approved": tr.validation_approved,
-                "error": tr.error,
-            }
-            for tr in result.task_results
-        ],
-    }
-
-    if args.output:
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(result_dict, f, indent=2, ensure_ascii=False)
-        logger.info(f"Results written to: {output_path}")
-    else:
-        print(json.dumps(result_dict, indent=2, ensure_ascii=False))
+    _output_results(result, args.output)
 
     if result.success:
         logger.info("All tasks completed successfully!")

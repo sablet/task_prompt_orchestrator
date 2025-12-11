@@ -1,0 +1,13 @@
+{
+  "threshold": 0,
+  "languages": ["python"],
+  "reporters": ["console"],
+  "ignore": ["**/tests/**", "**/.venv/**", "**/output/**", "**/__pycache__/**", "data/**", "model/**"],
+  "minTokens": 50,
+  "skipComments": true,
+  "format": ["python"],
+  "formatsExts": {
+    "python": [".py"]
+  },
+  "skipImports": true
+}

@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
@@ -73,7 +74,7 @@ class OrchestratorConfig:
     stream_output: bool = True
     stream_callback: Callable[[str], None] | None = None
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         """Serialize config for history storage."""
         return {
             "max_retries_per_task": self.max_retries_per_task,
@@ -88,7 +89,9 @@ class OrchestratorConfig:
 HISTORY_DIR = ".task-orchestrator-history"
 
 
-def save_history_to_file(history_dir: Path, history_id: str, data: dict) -> None:
+def save_history_to_file(
+    history_dir: Path, history_id: str, data: dict[str, Any]
+) -> None:
     """Save history data to a JSON file."""
     history_dir.mkdir(parents=True, exist_ok=True)
     file_path = history_dir / f"{history_id}.json"
@@ -96,7 +99,7 @@ def save_history_to_file(history_dir: Path, history_id: str, data: dict) -> None
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def load_history_from_file(history_dir: Path, history_id: str) -> dict:
+def load_history_from_file(history_dir: Path, history_id: str) -> dict[str, Any]:
     """Load history data from a JSON file."""
     file_path = history_dir / f"{history_id}.json"
     if not file_path.exists():
@@ -105,7 +108,7 @@ def load_history_from_file(history_dir: Path, history_id: str) -> dict:
         return json.load(f)
 
 
-def list_history_files(history_dir: Path) -> list[dict]:
+def list_history_files(history_dir: Path) -> list[dict[str, Any]]:
     """List all history files in a directory."""
     if not history_dir.exists():
         return []
@@ -138,7 +141,8 @@ class HistoryManager:
     def _ensure_dir(self) -> None:
         self.history_dir.mkdir(parents=True, exist_ok=True)
 
-    def _generate_history_id(self, yaml_path: str) -> str:
+    @staticmethod
+    def _generate_history_id(yaml_path: str) -> str:
         yaml_name = Path(yaml_path).stem
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         return f"{yaml_name}_{timestamp}"
@@ -309,6 +313,45 @@ def is_permission_error(feedback: str) -> bool:
     return any(indicator in feedback_lower for indicator in permission_indicators)
 
 
+def _format_tool_info(block: ToolUseBlock) -> str:
+    """Format tool use block info for display."""
+    tool_info = f"\n{CYAN}▶ {block.name}{RESET}"
+    if block.name not in {"Bash", "Read", "Write", "Edit"}:
+        return tool_info + "\n"
+    inp = block.input
+    if not isinstance(inp, dict):
+        return tool_info + "\n"
+    if "command" in inp:
+        tool_info += f" {DIM}{inp['command'][:80]}{RESET}"
+    elif "file_path" in inp:
+        tool_info += f" {DIM}{inp['file_path']}{RESET}"
+    return tool_info + "\n"
+
+
+def _process_text_block(
+    block: TextBlock,
+    output_parts: list[str],
+    callback: Callable[[str], None],
+    stream: bool,
+) -> None:
+    """Process a text block from assistant message."""
+    output_parts.append(block.text)
+    if stream:
+        callback(block.text)
+
+
+def _process_tool_result(
+    message: ToolResultBlock, callback: Callable[[str], None]
+) -> None:
+    """Process a tool result block."""
+    if not message.content:
+        return
+    content_str = str(message.content)
+    if len(content_str) > 200:
+        content_str = content_str[:200] + "..."
+    callback(f"{DIM}  └─ {content_str}{RESET}\n")
+
+
 async def run_claude_query(
     prompt: str, config: OrchestratorConfig, phase: str = ""
 ) -> str:
@@ -330,28 +373,11 @@ async def run_claude_query(
         if isinstance(message, AssistantMessage):
             for block in message.content:
                 if isinstance(block, TextBlock):
-                    output_parts.append(block.text)
-                    if stream:
-                        callback(block.text)
-                elif isinstance(block, ToolUseBlock):
-                    if stream:
-                        tool_info = f"\n{CYAN}▶ {block.name}{RESET}"
-                        if block.name in {"Bash", "Read", "Write", "Edit"}:
-                            # Show relevant input for common tools
-                            inp = block.input
-                            if isinstance(inp, dict):
-                                if "command" in inp:
-                                    tool_info += f" {DIM}{inp['command'][:80]}{RESET}"
-                                elif "file_path" in inp:
-                                    tool_info += f" {DIM}{inp['file_path']}{RESET}"
-                        callback(tool_info + "\n")
-        elif isinstance(message, ToolResultBlock):
-            if stream and message.content:
-                content_str = str(message.content)
-                # Truncate long tool results
-                if len(content_str) > 200:
-                    content_str = content_str[:200] + "..."
-                callback(f"{DIM}  └─ {content_str}{RESET}\n")
+                    _process_text_block(block, output_parts, callback, stream)
+                elif isinstance(block, ToolUseBlock) and stream:
+                    callback(_format_tool_info(block))
+        elif isinstance(message, ToolResultBlock) and stream:
+            _process_tool_result(message, callback)
         elif isinstance(message, ResultMessage) and stream:
             cost = getattr(message, "cost_usd", None)
             if cost:
@@ -512,6 +538,209 @@ class Orchestrator:
         )
 
 
+@dataclass
+class _OrchestratorState:
+    """Mutable state for orchestrator execution."""
+
+    task_results: list[TaskResult] = field(default_factory=list)
+    total_attempts: int = 0
+    completed_tasks: set[str] = field(default_factory=set)
+    start_task_index: int = 0
+    skip_to_validation: bool = False
+    existing_instruction_output: str | None = None
+
+
+def _restore_state_from_history(
+    state: _OrchestratorState, resume_history: ExecutionHistory
+) -> None:
+    """Restore orchestrator state from previous execution history."""
+    for tr in resume_history.task_results:
+        if tr.status == TaskStatus.APPROVED:
+            state.completed_tasks.add(tr.task_id)
+            state.task_results.append(tr)
+    state.total_attempts = resume_history.total_attempts
+
+
+def _determine_start_point(
+    state: _OrchestratorState,
+    resume_point: ResumePoint,
+    task_map: dict[str, tuple[int, Task]],
+    resume_history: ExecutionHistory | None,
+) -> None:
+    """Determine starting point for orchestration from resume point."""
+    if resume_point.task_id not in task_map:
+        raise ValueError(f"Resume task not found: {resume_point.task_id}")
+    state.start_task_index = task_map[resume_point.task_id][0] - 1
+    if resume_point.phase != ExecutionPhase.VALIDATION:
+        return
+    state.skip_to_validation = True
+    if resume_history:
+        for tr in resume_history.task_results:
+            if tr.task_id == resume_point.task_id and tr.instruction_output:
+                state.existing_instruction_output = tr.instruction_output
+                break
+    if not state.existing_instruction_output:
+        raise ValueError(
+            f"Cannot resume from validation: no instruction output for {resume_point.task_id}"
+        )
+
+
+def _check_dependency(task: Task, completed_tasks: set[str]) -> str | None:
+    """Check if task dependencies are met. Returns failed dep name or None."""
+    for dep in task.depends_on:
+        if dep not in completed_tasks:
+            return dep
+    return None
+
+
+def _save_history(
+    history: ExecutionHistory | None,
+    history_manager: HistoryManager | None,
+    state: _OrchestratorState,
+    error: str | None = None,
+    completed: bool = False,
+) -> None:
+    """Save history if history tracking is enabled."""
+    if not history or not history_manager:
+        return
+    history.task_results = state.task_results
+    history.total_attempts = state.total_attempts
+    if error:
+        history.error = error
+        history.completed = False
+    if completed:
+        history.completed_task_ids = list(state.completed_tasks)
+        history.completed = True
+        history.current_task_id = None
+        history.current_phase = None
+    history_manager.save_history(history)
+
+
+def _update_history_result(
+    history: ExecutionHistory | None,
+    history_manager: HistoryManager | None,
+    result: TaskResult,
+    total_attempts: int,
+) -> None:
+    """Update or add task result in history."""
+    if not history or not history_manager:
+        return
+    existing_idx = next(
+        (
+            i
+            for i, tr in enumerate(history.task_results)
+            if tr.task_id == result.task_id
+        ),
+        None,
+    )
+    if existing_idx is not None:
+        history.task_results[existing_idx] = result
+    else:
+        history.task_results.append(result)
+    history.total_attempts = total_attempts
+    history_manager.save_history(history)
+
+
+def _update_task_results(task_results: list[TaskResult], result: TaskResult) -> None:
+    """Update task results list, avoiding duplicates."""
+    existing_idx = next(
+        (i for i, tr in enumerate(task_results) if tr.task_id == result.task_id),
+        None,
+    )
+    if existing_idx is not None:
+        task_results[existing_idx] = result
+    else:
+        task_results.append(result)
+
+
+async def _execute_task_with_retries(
+    task: Task,
+    config: OrchestratorConfig,
+    state: _OrchestratorState,
+    task_index: int,
+    total_tasks: int,
+    history: ExecutionHistory | None,
+    history_manager: HistoryManager | None,
+    resume_point: ResumePoint | None,
+) -> tuple[TaskResult | None, str | None]:
+    """Execute a single task with retry logic.
+
+    Returns (result, error_summary) - error_summary is set if max retries exceeded.
+    """
+    attempts = 0
+    feedback: str | None = None
+    result: TaskResult | None = None
+    first_attempt = True
+    skip_instruction = state.skip_to_validation
+    instruction_output = state.existing_instruction_output
+
+    while attempts < config.max_retries_per_task:
+        attempts += 1
+        state.total_attempts += 1
+
+        if state.total_attempts > config.max_total_retries:
+            logger.error("Max total retries exceeded")
+            error_result = TaskResult(
+                task_id=task.id,
+                status=TaskStatus.FAILED,
+                attempts=attempts,
+                error="Max total retries exceeded",
+            )
+            state.task_results.append(error_result)
+            return None, "Max total retries exceeded"
+
+        should_skip = bool(
+            first_attempt
+            and skip_instruction
+            and resume_point
+            and task.id == resume_point.task_id
+        )
+        first_attempt = False
+
+        if history and history_manager:
+            phase = (
+                ExecutionPhase.VALIDATION if should_skip else ExecutionPhase.INSTRUCTION
+            )
+            history.current_phase = phase.value
+            history_manager.save_history(history)
+
+        logger.info(f"Task {task.id}: attempt {attempts}/{config.max_retries_per_task}")
+        result = await execute_task(
+            task,
+            config,
+            task_number=task_index,
+            total_tasks=total_tasks,
+            attempt=attempts,
+            previous_feedback=feedback,
+            skip_instruction=should_skip,
+            existing_instruction_output=instruction_output if should_skip else None,
+        )
+        result.attempts = attempts
+
+        _update_history_result(history, history_manager, result, state.total_attempts)
+
+        if result.status == TaskStatus.APPROVED:
+            logger.info(f"Task {task.id} approved on attempt {attempts}")
+            state.completed_tasks.add(task.id)
+            if history and history_manager:
+                history.completed_task_ids = list(state.completed_tasks)
+                history_manager.save_history(history)
+            break
+        if result.status == TaskStatus.PERMISSION_DENIED:
+            logger.error(f"Task {task.id} failed: permission denied (no retry)")
+            break
+        if result.status == TaskStatus.DECLINED:
+            feedback = result.error
+            logger.warning(f"Task {task.id} declined: {feedback}")
+            skip_instruction = False
+            instruction_output = None
+        else:
+            logger.error(f"Task {task.id} failed: {result.error}")
+            break
+
+    return result, None
+
+
 async def run_orchestrator(
     task_definition: TaskDefinition,
     config: OrchestratorConfig | None = None,
@@ -520,254 +749,95 @@ async def run_orchestrator(
     resume_point: ResumePoint | None = None,
     resume_history: ExecutionHistory | None = None,
 ) -> OrchestratorResult:
-    """Run the full task orchestrator with history tracking and resume support.
-
-    Flow:
-    - For each task in order (respecting dependencies):
-      - Execute instruction
-      - Run validation
-      - If approved: proceed to next task
-      - If declined: retry same task with feedback (up to max_retries)
-
-    Args:
-        task_definition: Tasks to execute
-        config: Orchestrator configuration
-        yaml_path: Path to YAML file (for history tracking)
-        history_manager: History manager instance (enables history tracking)
-        resume_point: Where to resume from (e.g., ResumePoint("task3", ExecutionPhase.VALIDATION))
-        resume_history: Previous execution history to resume from
-    """
+    """Run the full task orchestrator with history tracking and resume support."""
     if config is None:
         config = OrchestratorConfig()
 
-    # Initialize history tracking
     history: ExecutionHistory | None = None
     if history_manager and yaml_path:
         history = resume_history or history_manager.create_history(yaml_path, config)
 
-    task_results: list[TaskResult] = []
-    total_attempts = 0
-    completed_tasks: set[str] = set()
-
-    # Restore state from history if resuming
+    state = _OrchestratorState()
     if resume_history:
-        for tr in resume_history.task_results:
-            if tr.status == TaskStatus.APPROVED:
-                completed_tasks.add(tr.task_id)
-                task_results.append(tr)
-        total_attempts = resume_history.total_attempts
+        _restore_state_from_history(state, resume_history)
 
-    # Build task index map
     task_map = {t.id: (i, t) for i, t in enumerate(task_definition.tasks, start=1)}
 
-    # Determine starting point
-    start_task_index = 0
-    skip_to_validation = False
-    existing_instruction_output: str | None = None
-
     if resume_point:
-        if resume_point.task_id not in task_map:
-            raise ValueError(f"Resume task not found: {resume_point.task_id}")
-        start_task_index = task_map[resume_point.task_id][0] - 1
-        if resume_point.phase == ExecutionPhase.VALIDATION:
-            skip_to_validation = True
-            # Find existing instruction output from history
-            if resume_history:
-                for tr in resume_history.task_results:
-                    if tr.task_id == resume_point.task_id and tr.instruction_output:
-                        existing_instruction_output = tr.instruction_output
-                        break
-            if not existing_instruction_output:
-                raise ValueError(
-                    f"Cannot resume from validation: no instruction output found for {resume_point.task_id}"
-                )
+        _determine_start_point(state, resume_point, task_map, resume_history)
 
     total_tasks = len(task_definition.tasks)
 
     for task_index, task in enumerate(task_definition.tasks, start=1):
-        # Skip tasks before resume point
-        if task_index - 1 < start_task_index:
+        if task_index - 1 < state.start_task_index or task.id in state.completed_tasks:
             continue
 
-        # Skip already completed tasks
-        if task.id in completed_tasks:
-            continue
+        failed_dep = _check_dependency(task, state.completed_tasks)
+        if failed_dep:
+            logger.error(f"Dependency {failed_dep} not completed for task {task.id}")
+            error_result = TaskResult(
+                task_id=task.id,
+                status=TaskStatus.FAILED,
+                error=f"Dependency {failed_dep} not completed",
+            )
+            state.task_results.append(error_result)
+            _save_history(history, history_manager, state, error=error_result.error)
+            return OrchestratorResult(
+                task_results=state.task_results,
+                success=False,
+                total_attempts=state.total_attempts,
+                summary=f"Failed due to unmet dependency: {failed_dep}",
+            )
 
-        # Check dependencies
-        for dep in task.depends_on:
-            if dep not in completed_tasks:
-                logger.error(f"Dependency {dep} not completed for task {task.id}")
-                error_result = TaskResult(
-                    task_id=task.id,
-                    status=TaskStatus.FAILED,
-                    error=f"Dependency {dep} not completed",
-                )
-                task_results.append(error_result)
-                if history and history_manager:
-                    history.task_results = task_results
-                    history.completed = False
-                    history.error = f"Dependency {dep} not completed"
-                    history_manager.save_history(history)
-                return OrchestratorResult(
-                    task_results=task_results,
-                    success=False,
-                    total_attempts=total_attempts,
-                    summary=f"Failed due to unmet dependency: {dep}",
-                )
-
-        # Update history: current task
         if history and history_manager:
             history.current_task_id = task.id
             history.current_phase = ExecutionPhase.INSTRUCTION.value
             history_manager.save_history(history)
 
-        # Execute task with retry logic
-        attempts = 0
-        feedback: str | None = None
-        result: TaskResult | None = None
-        first_attempt_of_task = True
+        result, error_summary = await _execute_task_with_retries(
+            task,
+            config,
+            state,
+            task_index,
+            total_tasks,
+            history,
+            history_manager,
+            resume_point,
+        )
 
-        while attempts < config.max_retries_per_task:
-            attempts += 1
-            total_attempts += 1
-
-            if total_attempts > config.max_total_retries:
-                logger.error("Max total retries exceeded")
-                error_result = TaskResult(
-                    task_id=task.id,
-                    status=TaskStatus.FAILED,
-                    attempts=attempts,
-                    error="Max total retries exceeded",
-                )
-                task_results.append(error_result)
-                if history and history_manager:
-                    history.task_results = task_results
-                    history.total_attempts = total_attempts
-                    history.error = "Max total retries exceeded"
-                    history_manager.save_history(history)
-                return OrchestratorResult(
-                    task_results=task_results,
-                    success=False,
-                    total_attempts=total_attempts,
-                    summary="Max total retries exceeded",
-                )
-
-            # Determine if we should skip instruction (resume from validation)
-            should_skip_instruction = (
-                first_attempt_of_task
-                and skip_to_validation
-                and task.id == resume_point.task_id
-                if resume_point
-                else False
+        if error_summary:
+            _save_history(history, history_manager, state, error=error_summary)
+            return OrchestratorResult(
+                task_results=state.task_results,
+                success=False,
+                total_attempts=state.total_attempts,
+                summary=error_summary,
             )
-            first_attempt_of_task = False
-
-            # Update history: phase tracking
-            if history and history_manager:
-                if not should_skip_instruction:
-                    history.current_phase = ExecutionPhase.INSTRUCTION.value
-                else:
-                    history.current_phase = ExecutionPhase.VALIDATION.value
-                history_manager.save_history(history)
-
-            logger.info(
-                f"Task {task.id}: attempt {attempts}/{config.max_retries_per_task}"
-            )
-            result = await execute_task(
-                task,
-                config,
-                task_number=task_index,
-                total_tasks=total_tasks,
-                attempt=attempts,
-                previous_feedback=feedback,
-                skip_instruction=should_skip_instruction,
-                existing_instruction_output=existing_instruction_output
-                if should_skip_instruction
-                else None,
-            )
-            result.attempts = attempts
-
-            # Update history: task result
-            if history and history_manager:
-                # Update or add result
-                existing_idx = next(
-                    (
-                        i
-                        for i, tr in enumerate(history.task_results)
-                        if tr.task_id == task.id
-                    ),
-                    None,
-                )
-                if existing_idx is not None:
-                    history.task_results[existing_idx] = result
-                else:
-                    history.task_results.append(result)
-                history.total_attempts = total_attempts
-                history_manager.save_history(history)
-
-            if result.status == TaskStatus.APPROVED:
-                logger.info(f"Task {task.id} approved on attempt {attempts}")
-                completed_tasks.add(task.id)
-                if history and history_manager:
-                    history.completed_task_ids = list(completed_tasks)
-                    history_manager.save_history(history)
-                break
-            if result.status == TaskStatus.PERMISSION_DENIED:
-                logger.error(f"Task {task.id} failed: permission denied (no retry)")
-                break
-            if result.status == TaskStatus.DECLINED:
-                feedback = result.error
-                logger.warning(f"Task {task.id} declined: {feedback}")
-                # Clear skip flag for retry
-                skip_to_validation = False
-                existing_instruction_output = None
-            else:
-                logger.error(f"Task {task.id} failed: {result.error}")
-                break
 
         if result:
-            # Update task_results (avoid duplicates)
-            existing_idx = next(
-                (i for i, tr in enumerate(task_results) if tr.task_id == task.id),
-                None,
-            )
-            if existing_idx is not None:
-                task_results[existing_idx] = result
-            else:
-                task_results.append(result)
-
+            _update_task_results(state.task_results, result)
             if result.status != TaskStatus.APPROVED:
-                if result.status == TaskStatus.PERMISSION_DENIED:
-                    summary = f"Task {task.id} failed: permission denied"
-                else:
-                    summary = f"Task {task.id} failed after {attempts} attempts"
-                if history and history_manager:
-                    history.task_results = task_results
-                    history.error = summary
-                    history_manager.save_history(history)
+                summary = (
+                    f"Task {task.id} failed: permission denied"
+                    if result.status == TaskStatus.PERMISSION_DENIED
+                    else f"Task {task.id} failed after {result.attempts} attempts"
+                )
+                _save_history(history, history_manager, state, error=summary)
                 return OrchestratorResult(
-                    task_results=task_results,
+                    task_results=state.task_results,
                     success=False,
-                    total_attempts=total_attempts,
+                    total_attempts=state.total_attempts,
                     summary=summary,
                 )
 
-        # Reset skip flag after first task
-        skip_to_validation = False
-        existing_instruction_output = None
+        state.skip_to_validation = False
+        state.existing_instruction_output = None
 
-    # Mark history as completed
-    if history and history_manager:
-        history.task_results = task_results
-        history.completed_task_ids = list(completed_tasks)
-        history.completed = True
-        history.current_task_id = None
-        history.current_phase = None
-        history_manager.save_history(history)
+    _save_history(history, history_manager, state, completed=True)
 
     return OrchestratorResult(
-        task_results=task_results,
+        task_results=state.task_results,
         success=True,
-        total_attempts=total_attempts,
+        total_attempts=state.total_attempts,
         summary=f"All {len(task_definition.tasks)} tasks completed successfully",
     )

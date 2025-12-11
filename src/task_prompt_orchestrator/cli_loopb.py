@@ -232,12 +232,16 @@ def output_loopb_result(
     history: LoopBExecutionHistory, args: argparse.Namespace
 ) -> int:
     """Output the Loop B result and return exit code."""
-    # Import here to avoid circular import
-    from .cli import write_json_result
-
     result_dict = build_loopb_result_dict(history)
     output_path = Path(args.output) if args.output else None
-    write_json_result(result_dict, output_path)
+
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result_dict, f, indent=2, ensure_ascii=False)
+        logger.info(f"Results written to: {output_path}")
+    else:
+        print(json.dumps(result_dict, indent=2, ensure_ascii=False))
 
     if history.status == LoopBStatus.COMPLETED:
         logger.info("All requirements fulfilled!")
