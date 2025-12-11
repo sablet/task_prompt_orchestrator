@@ -215,7 +215,11 @@ class HistoryManager:
 
 def build_instruction_prompt(task: Task, cwd: str | None = None) -> str:
     """Build prompt for task instruction execution."""
-    cwd_note = f"\n**Working directory: {cwd}**\nAll relative paths should be resolved from this directory.\n" if cwd else ""
+    cwd_note = (
+        f"\n**Working directory: {cwd}**\nAll relative paths should be resolved from this directory.\n"
+        if cwd
+        else ""
+    )
     return f"""## Task: {task.name}
 {cwd_note}
 {task.instruction}
@@ -282,7 +286,9 @@ def extract_validation_result(output: str) -> tuple[bool, str]:
     output_lower = output.lower()
     if "approved" in output_lower and "true" in output_lower:
         return True, ""
-    if "all criteria" in output_lower and ("met" in output_lower or "pass" in output_lower):
+    if "all criteria" in output_lower and (
+        "met" in output_lower or "pass" in output_lower
+    ):
         return True, ""
 
     return False, "Could not determine validation result"
@@ -303,7 +309,9 @@ def is_permission_error(feedback: str) -> bool:
     return any(indicator in feedback_lower for indicator in permission_indicators)
 
 
-async def run_claude_query(prompt: str, config: OrchestratorConfig, phase: str = "") -> str:
+async def run_claude_query(
+    prompt: str, config: OrchestratorConfig, phase: str = ""
+) -> str:
     """Run a single Claude Code query and return text output with streaming."""
     options = ClaudeAgentOptions(
         allowed_tools=config.allowed_tools,
@@ -375,7 +383,9 @@ async def execute_instruction_phase(
 
     if stream:
         callback(f"\n{BOLD}{'=' * 60}{RESET}\n")
-        callback(f"{BOLD}📋 INSTRUCTION [{task_number}/{total_tasks}] (attempt {attempt}): {task.name}{RESET}\n")
+        callback(
+            f"{BOLD}📋 INSTRUCTION [{task_number}/{total_tasks}] (attempt {attempt}): {task.name}{RESET}\n"
+        )
         callback(f"{BOLD}{'=' * 60}{RESET}\n")
         callback(f"{DIM}>>> PROMPT >>>{RESET}\n")
         callback(f"{DIM}{instruction_prompt}{RESET}\n")
@@ -436,7 +446,9 @@ async def execute_task(
             result.instruction_output = existing_instruction_output
             if stream:
                 callback(f"\n{BOLD}{'=' * 60}{RESET}\n")
-                callback(f"{BOLD}📋 RESUMING from VALIDATION [{task_number}/{total_tasks}]: {task.name}{RESET}\n")
+                callback(
+                    f"{BOLD}📋 RESUMING from VALIDATION [{task_number}/{total_tasks}]: {task.name}{RESET}\n"
+                )
                 callback(f"{BOLD}{'=' * 60}{RESET}\n")
         else:
             result.instruction_output = await execute_instruction_phase(
@@ -658,7 +670,9 @@ async def run_orchestrator(
                     history.current_phase = ExecutionPhase.VALIDATION.value
                 history_manager.save_history(history)
 
-            logger.info(f"Task {task.id}: attempt {attempts}/{config.max_retries_per_task}")
+            logger.info(
+                f"Task {task.id}: attempt {attempts}/{config.max_retries_per_task}"
+            )
             result = await execute_task(
                 task,
                 config,
@@ -667,7 +681,9 @@ async def run_orchestrator(
                 attempt=attempts,
                 previous_feedback=feedback,
                 skip_instruction=should_skip_instruction,
-                existing_instruction_output=existing_instruction_output if should_skip_instruction else None,
+                existing_instruction_output=existing_instruction_output
+                if should_skip_instruction
+                else None,
             )
             result.attempts = attempts
 
@@ -675,7 +691,11 @@ async def run_orchestrator(
             if history and history_manager:
                 # Update or add result
                 existing_idx = next(
-                    (i for i, tr in enumerate(history.task_results) if tr.task_id == task.id),
+                    (
+                        i
+                        for i, tr in enumerate(history.task_results)
+                        if tr.task_id == task.id
+                    ),
                     None,
                 )
                 if existing_idx is not None:

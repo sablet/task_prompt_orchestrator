@@ -19,7 +19,13 @@ from .orchestrator import (
     build_validation_prompt,
     run_orchestrator,
 )
-from .schema import ExecutionHistory, ExecutionPhase, ResumePoint, TaskDefinition, create_sample_task_yaml
+from .schema import (
+    ExecutionHistory,
+    ExecutionPhase,
+    ResumePoint,
+    TaskDefinition,
+    create_sample_task_yaml,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,7 +193,9 @@ Example usage:
     )
 
     # Resume command
-    resume_parser = subparsers.add_parser("resume", help="Resume execution from history")
+    resume_parser = subparsers.add_parser(
+        "resume", help="Resume execution from history"
+    )
     resume_parser.add_argument("history_id", type=str, help="History ID to resume")
     resume_parser.add_argument(
         "--from",
@@ -323,7 +331,12 @@ def format_history_summary(history: ExecutionHistory) -> str:
     """Format a history entry as one-line summary for list view."""
     status_icon = "✅" if history.completed else "🔄"
     completed = len(history.completed_task_ids)
-    total = len(history.task_results) + (1 if history.current_task_id and history.current_task_id not in history.completed_task_ids else 0)
+    total = len(history.task_results) + (
+        1
+        if history.current_task_id
+        and history.current_task_id not in history.completed_task_ids
+        else 0
+    )
     total = max(total, completed)
 
     current = ""
@@ -349,7 +362,9 @@ def format_history_detail(history: ExecutionHistory) -> str:
     ]
 
     if history.current_task_id:
-        lines.append(f"  Current:    {history.current_task_id}_{history.current_phase or 'unknown'}")
+        lines.append(
+            f"  Current:    {history.current_task_id}_{history.current_phase or 'unknown'}"
+        )
 
     if history.error:
         lines.append(f"  Error:      {history.error}")
@@ -361,7 +376,9 @@ def format_history_detail(history: ExecutionHistory) -> str:
         lines.append("Saved config:")
         lines.append(f"  cwd:        {cfg.get('cwd', '(none)')}")
         lines.append(f"  model:      {cfg.get('model', '(default)')}")
-        lines.append(f"  retries:    {cfg.get('max_retries_per_task', 3)} per task, {cfg.get('max_total_retries', 10)} total")
+        lines.append(
+            f"  retries:    {cfg.get('max_retries_per_task', 3)} per task, {cfg.get('max_total_retries', 10)} total"
+        )
 
     # Task results
     lines.append("")
@@ -369,8 +386,14 @@ def format_history_detail(history: ExecutionHistory) -> str:
     if history.task_results:
         for tr in history.task_results:
             status_mark = "✓" if tr.status.value == "approved" else "✗"
-            error_info = f" - {tr.error[:50]}..." if tr.error and len(tr.error) > 50 else (f" - {tr.error}" if tr.error else "")
-            lines.append(f"  {status_mark} {tr.task_id}: {tr.status.value} (attempts: {tr.attempts}){error_info}")
+            error_info = (
+                f" - {tr.error[:50]}..."
+                if tr.error and len(tr.error) > 50
+                else (f" - {tr.error}" if tr.error else "")
+            )
+            lines.append(
+                f"  {status_mark} {tr.task_id}: {tr.status.value} (attempts: {tr.attempts}){error_info}"
+            )
     else:
         lines.append("  (none)")
 
@@ -434,9 +457,15 @@ def history_command(args: argparse.Namespace) -> int:
         return 0
 
     if args.json:
-        print(json.dumps([h.to_dict() for h in histories], indent=2, ensure_ascii=False))
+        print(
+            json.dumps([h.to_dict() for h in histories], indent=2, ensure_ascii=False)
+        )
     else:
-        title = "All execution history:" if args.all else "Incomplete executions (resumable):"
+        title = (
+            "All execution history:"
+            if args.all
+            else "Incomplete executions (resumable):"
+        )
         print(title)
         for history in histories:
             print(format_history_summary(history))
@@ -459,7 +488,9 @@ async def resume_command(args: argparse.Namespace) -> int:
         return 1
 
     if history.completed:
-        logger.error(f"History {args.history_id} is already completed. Nothing to resume.")
+        logger.error(
+            f"History {args.history_id} is already completed. Nothing to resume."
+        )
         return 1
 
     # Load task definition
