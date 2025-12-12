@@ -21,6 +21,11 @@ def _format_requirements_with_ids(requirements: list[Requirement]) -> str:
         for i, criterion in enumerate(req.acceptance_criteria, 1):
             criterion_id = f"{req.id}.{i}"
             lines.append(f"  - `{criterion_id}`: {criterion}")
+        if req.design_decisions:
+            lines.append("**Design Decisions**:")
+            for i, decision in enumerate(req.design_decisions, 1):
+                decision_id = f"{req.id}.d{i}"
+                lines.append(f"  - `{decision_id}`: {decision}")
         lines.append("")
     return "\n".join(lines)
 
@@ -35,6 +40,10 @@ def _format_requirements(requirements: list[Requirement]) -> str:
         lines.append("**Acceptance Criteria**:")
         for criterion in req.acceptance_criteria:
             lines.append(f"  - {criterion}")
+        if req.design_decisions:
+            lines.append("**Design Decisions**:")
+            for decision in req.design_decisions:
+                lines.append(f"  - {decision}")
         lines.append("")
     return "\n".join(lines)
 
@@ -206,11 +215,13 @@ def get_unmet_requirement_ids(verification_result: dict[str, Any]) -> list[str]:
 
 
 def get_all_criterion_ids(requirements: RequirementDefinition) -> set[str]:
-    """Get all acceptance criterion IDs from requirements."""
+    """Get all acceptance criterion and design decision IDs from requirements."""
     ids = set()
     for req in requirements.requirements:
         for i in range(1, len(req.acceptance_criteria) + 1):
             ids.add(f"{req.id}.{i}")
+        for i in range(1, len(req.design_decisions) + 1):
+            ids.add(f"{req.id}.d{i}")
     return ids
 
 
@@ -226,7 +237,7 @@ def get_covered_criterion_ids(tasks: list[Task]) -> set[str]:
 def check_coverage(
     requirements: RequirementDefinition, tasks: list[Task]
 ) -> tuple[bool, list[str]]:
-    """Check if all acceptance criteria are covered by task validations.
+    """Check if all acceptance criteria and design decisions are covered by task validations.
 
     Returns:
         Tuple of (all_covered, list_of_uncovered_ids)

@@ -279,6 +279,7 @@ class Requirement:
     id: str
     name: str
     acceptance_criteria: list[str]
+    design_decisions: list[str] = field(default_factory=list)  # Technical decisions to verify
     notes: str | None = None  # Optional notes for additional context
 
 
@@ -299,6 +300,7 @@ class RequirementDefinition:
                 id=req["id"],
                 name=req["name"],
                 acceptance_criteria=req.get("acceptance_criteria", []),
+                design_decisions=req.get("design_decisions", []),
                 notes=req.get("notes"),
             )
             for req in data.get("requirements", [])

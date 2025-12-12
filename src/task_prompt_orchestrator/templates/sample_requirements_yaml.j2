@@ -3,27 +3,33 @@
 #
 # Loop B generates tasks from requirements automatically,
 # then executes Loop C for each generated task set.
+#
+# - acceptance_criteria: ユーザー視点の要件（何が欲しいか）
+# - design_decisions: 技術視点の判断（どう実現するか）※オプション
 
 requirements:
   - id: req_greeting
     name: 基本的な挨拶関数の実装
     notes: |
       output/greeting.py に実装する。
-      型ヒントを使用すること。
     acceptance_criteria:
-      - "hello(name) 関数が存在し、'Hello, {name}!' を返す"
+      - "hello(name) 関数が 'Hello, {name}!' を返す"
       - "デフォルト引数で hello() を呼ぶと 'Hello, World!' を返す"
+    design_decisions:  # オプション
+      - "型ヒントを使用する"
 
   - id: req_variations
     name: 挨拶バリエーションの追加
     acceptance_criteria:
-      - "goodbye(name) 関数が存在し、'Goodbye, {name}!' を返す"
+      - "goodbye(name) 関数が 'Goodbye, {name}!' を返す"
       - "greet(name, greeting) で任意の挨拶ができる"
+    # design_decisions は省略可
 
   - id: req_tests
     name: ユニットテストの作成
-    notes: pytestを使用
     acceptance_criteria:
       - "pytest で実行可能なテストファイルが存在"
       - "全関数に対して最低2つのテストケース"
       - "全テストがパスする"
+    design_decisions:
+      - "pytest を使用する"

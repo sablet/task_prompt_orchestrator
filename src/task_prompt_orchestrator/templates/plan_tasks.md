@@ -11,25 +11,39 @@ tasks.yaml を作成または修正します。
 Loop C で順次実行するための **タスク定義** ファイル。
 各タスクに具体的な作業指示と検証項目を記載し、自動実行・検証を行う。
 
-## 詳細設計ドキュメントが必要なケース
+## requirements.yaml との関係
 
-以下のケースでは tasks.yaml に加えて `doc/design/{feature-name}-design.md` を作成する:
+tasks.yaml は requirements.yaml の `acceptance_criteria` と `design_decisions` を詳細な実装タスクにブレイクダウンしたもの。
 
-- **アーキテクチャ判断**: 技術選択の根拠（WebSocket vs SSE 等）
-- **複雑なデータ構造**: 状態遷移図、ER図、スキーマ定義
-- **外部システム連携**: シーケンス図、API仕様、認証フロー
-- **UI/UX設計**: ワイヤーフレーム、画面遷移、コンポーネント構成
+- **acceptance_criteria**: ユーザー視点の要件 → タスクの目的
+- **design_decisions**: 技術判断 → タスクの実装方針
 
-詳細ドキュメントを作成した場合、tasks.yaml の `instruction` から参照する:
+## 可視化資料（実装指示の補助）
+
+instruction にテキストで書くより、図表やサンプルを見せた方が実装意図が明確に伝わるケースがある。
+**詳細設計ではなく、タスク実装時の判断材料**として使う点に注意。
+
+### 可視化が有効なケース
+
+| ケース | 可視化方法 | 伝わること |
+|--------|------------|------------|
+| 出力フォーマット | サンプル出力（実データ or モック） | 期待する出力形式 |
+| コンポーネント構成 | コンポーネント図（Mermaid等） | 実装すべきモジュールと責務 |
+| データフロー/パイプライン | フロー図・パイプライン図 | 処理ステップと入出力の流れ |
+| 処理フロー | シーケンス図 | 実装すべき処理順序・呼び出し関係 |
+
+### 参照方法
+
+`doc/design/{feature-name}-visual.md` を作成し、instruction から参照する:
 
 ```yaml
-- id: task_payment
-  name: 決済処理の実装
+- id: task_report
+  name: 売上レポート出力の実装
   instruction: |
-    doc/design/payment-design.md のシーケンス図に従って実装する。
+    doc/design/sales-report-visual.md のサンプル出力形式に従って実装する。
 
-    ## 参照
-    - doc/design/payment-design.md
+    ## 変更対象
+    - `src/reports/sales.py`: レポート生成ロジック
 ```
 
 ## モード判定

@@ -47,7 +47,7 @@
 3. **依存関係の明示**: depends_on で順序を制御
 4. **自己完結**: 各タスクの instruction は単独で実行可能な情報を含む
 5. **セットアップと作業の分離**: ツールのインストール等のセットアップは、それを使う作業と同一タスクにしない
-6. **カバレッジ追跡**: 各 validation で対応する acceptance_criteria ID を covers で明示（後続イテレーションで残りをカバー可能）
+6. **カバレッジ追跡**: 各 validation で対応する acceptance_criteria / design_decisions の ID を covers で明示（後続イテレーションで残りをカバー可能）
 
 ## 出力フォーマット
 
@@ -66,7 +66,7 @@ tasks:
       - `{path/to/related}`: {役割・関係性}
     validation:
       - criterion: "{検証項目1}"
-        covers: [req_id.1, req_id.2]
+        covers: [req_id.1, req_id.2]  # acceptance_criteria
       - criterion: "{検証項目2}"
-        covers: [req_id.3]
+        covers: [req_id.3, req_id.d1]  # design_decisions は req_id.d{N} 形式
 ```

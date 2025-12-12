@@ -1,8 +1,7 @@
 # Sample requirements definition for Loop B orchestrator
-# Format is similar to tasks.yaml
 #
-# 詳細な要件定義はMarkdownで記述し、acceptance_criteria内でパスを参照可能:
-#   - "doc/design/feature-spec.md に記載の仕様を満たす"
+# - acceptance_criteria: ユーザー視点の要件（何が欲しいか）
+# - design_decisions: 技術視点の判断（どう実現するか）※オプション
 #
 # Claude Code が自動的にファイルを読み込んで検証する
 
@@ -13,29 +12,36 @@ requirements:
       CSVの列は date, category, amount を想定。
       空行・不正データは無視する。
     acceptance_criteria:
-      - "aggregate_by_category(data) が商品カテゴリ別の売上合計を返す"
-      - "aggregate_by_month(data) が月別の売上合計を返す"
-      - "戻り値は dict[str, float] 形式"
+      - "カテゴリ別の売上合計を取得できる"
+      - "月別の売上合計を取得できる"
+    design_decisions:
+      - "aggregate_by_category(data) -> dict[str, float] で実装する"
+      - "aggregate_by_month(data) -> dict[str, float] で実装する"
 
   - id: req_report_output
     name: Markdownレポートの生成
     acceptance_criteria:
-      - "generate_report() がmarkdown形式の文字列を返す"
       - "レポートにカテゴリ別売上テーブルが含まれる"
       - "レポートに月別売上テーブルが含まれる"
       - "合計金額が表示される"
+    design_decisions:
+      - "generate_report() がmarkdown形式の文字列を返す"
 
   - id: req_cli
     name: CLIからの実行
-    notes: clickライブラリを使用すること
     acceptance_criteria:
-      - "--output オプションで出力先を指定できる"
+      - "出力先を指定できる"
       - "指定がない場合は標準出力に表示"
       - "既存の load_sales_data() を変更しない"
+    design_decisions:
+      - "click ライブラリを使用する"
+      - "--output オプションで出力先を指定"
 
   - id: req_env
     name: 実行場所やデータの整備
     acceptance_criteria:
-      - "コードはカレントディレクトリではなく、output/sales_report_test 配下に作成する"
-      - "このディレクトリに移動してから、 uv run python -m sales report input.csv で実行できる"
-      - "input.csv は10行ほどのサンプルデータを作成して動作検証ができている"
+      - "output/sales_report_test 配下で動作する"
+      - "サンプルデータで動作検証ができている"
+    design_decisions:
+      - "uv run python -m sales report input.csv で実行できる"
+      - "input.csv は10行ほどのサンプルデータを作成する"

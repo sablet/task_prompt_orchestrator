@@ -8,28 +8,55 @@ requirements.yaml を作成または修正します。
 
 ## requirements.yaml とは
 
-Loop B で自動検証するための **受け入れ基準（Acceptance Criteria）** を定義するファイル。
-一般的な要件定義ドキュメントとは異なり、LLM が検証可能な条件に特化している。
+Loop B で自動検証するための **要件** と **設計判断** を定義するファイル。
+人がレビューし、実装後に LLM が検証する。
 
-## 詳細設計ドキュメントが必要なケース
+## 要件（acceptance_criteria）と設計判断（design_decisions）の違い
 
-以下のケースでは requirements.yaml に加えて `doc/design/{feature-name}-design.md` を作成する:
+| 項目 | acceptance_criteria | design_decisions |
+|------|---------------------|------------------|
+| 観点 | ユーザー視点（何が欲しいか） | 技術視点（どう実現するか） |
+| 例 | 「カテゴリ別に売上を集計できる」 | 「集計処理は Pandas を使用する」 |
+| レビュー | ビジネス要件として妥当か | 技術選択として妥当か |
 
-- **アーキテクチャ判断**: 技術選択の根拠（WebSocket vs SSE 等）
-- **複雑なデータ構造**: 状態遷移図、ER図、スキーマ定義
-- **外部システム連携**: シーケンス図、API仕様、認証フロー
-- **UI/UX設計**: ワイヤーフレーム、画面遷移、コンポーネント構成
+両方とも実装後に LLM が検証する。`design_decisions` はオプション（技術判断が不要な場合は省略可）。
 
-詳細ドキュメントを作成した場合、requirements.yaml の `notes` や `acceptance_criteria` から参照する:
+## 可視化資料（要件判断の材料）
+
+テキストで記述するより、図表やサンプル出力を見せた方が acceptance_criteria / design_decisions を明確に判断できるケースがある。
+**詳細設計ではなく、ユーザー要件（acceptance_criteria）と技術判断（design_decisions）の判断材料**として使う点に注意。
+
+
+### 可視化が有効なケース
+
+| ケース | 可視化方法 | 判断できること |
+|--------|------------|----------------|
+| 出力レポートのフォーマット | サンプル出力（実データ or モック） | 「この形式で出力される」が妥当か |
+| アーキテクチャ構成 | コンポーネント図（Mermaid等） | モジュール分割・責務配置が妥当か |
+| データフロー/パイプライン | フロー図・パイプライン図 | 処理ステップ・入出力の流れが妥当か |
+| UI/画面設計 | ワイヤーフレーム・モックアップ | ユーザー操作フローが妥当か |
+
+### 作成場所と参照方法
+
+`doc/design/{feature-name}-visual.md` に作成し、`notes` から参照する:
 
 ```yaml
-- id: req_payment
-  name: 決済処理
+- id: req_report
+  name: 売上レポート出力
   notes: |
-    詳細設計: doc/design/payment-design.md を参照
+    出力サンプル: doc/design/sales-report-visual.md
   acceptance_criteria:
-    - "doc/design/payment-design.md のシーケンス図通りに動作する"
+    - "カテゴリ別に売上を集計できる"
+    - "CSV形式でエクスポートできる"
+  design_decisions:
+    - "集計処理は Pandas を使用する"
 ```
+
+### 可視化資料の原則
+
+- **目的**: acceptance_criteria / design_decisions のレビュー判断を助ける
+- **範囲**: 詳細設計ではない。実装詳細は含めない
+- **粒度**: 要件の妥当性を判断できる最小限の情報
 
 ## モード判定
 
@@ -71,13 +98,16 @@ requirements:
     notes: |
       {補足情報・背景・制約など}
     acceptance_criteria:
-      - "{検証可能な受け入れ基準1}"
-      - "{検証可能な受け入れ基準2}"
+      - "{ユーザー観点の検証可能な基準1}"
+      - "{ユーザー観点の検証可能な基準2}"
+    design_decisions:  # オプション
+      - "{技術選択の検証可能な基準}"
 
   - id: req_2
     name: {要件名}
     acceptance_criteria:
       - "{受け入れ基準}"
+    # design_decisions は省略可
 ```
 
 ---
@@ -105,17 +135,20 @@ requirements:
 
 ## 要件定義の原則
 
-1. **検証可能性**: 受け入れ基準は機械的または明確に検証可能であること
-   - 良い例: 「`aggregate_by_category(data)` が `dict[str, float]` を返す」
-   - 悪い例: 「使いやすいUIを提供する」
+1. **検証可能性**: 受け入れ基準・設計判断は LLM が検証可能であること
+   - acceptance_criteria 良い例: 「カテゴリ別に売上を集計できる」
+   - acceptance_criteria 悪い例: 「使いやすいUIを提供する」
+   - design_decisions 良い例: 「集計処理は Pandas を使用する」
 
-2. **独立性**: 各要件は可能な限り独立して検証可能であること
+2. **観点の分離**: ユーザー要件（acceptance_criteria）と技術判断（design_decisions）を分ける
 
-3. **具体性**: 曖昧さを排除し、実装者が迷わない記述
+3. **独立性**: 各要件は可能な限り独立して検証可能であること
 
-4. **完全性**: 成功条件を満たすために必要な要件が網羅されていること
+4. **具体性**: 曖昧さを排除し、実装者が迷わない記述
 
-5. **notes の活用**: 背景情報、技術的制約、参考リンクなどを notes に記載
+5. **完全性**: 成功条件を満たすために必要な要件が網羅されていること
+
+6. **notes の活用**: 背景情報、技術的制約、参考リンクなどを notes に記載
 
 ---
 
