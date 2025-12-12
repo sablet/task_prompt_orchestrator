@@ -318,9 +318,9 @@ class RequirementsOrchestrator:
         self.history.status = LoopBStatus.GENERATING_TASKS
         self._save_history()
 
-        tasks = await self._generate_tasks_with_coverage_check(iteration)
+        tasks = await self._generate_tasks_with_coverage_warning(iteration)
         if not tasks:
-            self._fail("Failed to generate tasks with full coverage")
+            self._fail("Failed to generate tasks")
             return None, ""
 
         tasks_yaml_path = self._write_tasks_yaml(tasks, iteration)
@@ -602,41 +602,32 @@ class RequirementsOrchestrator:
             self.history.final_result = final_result
             self._save_history()
 
-    async def _generate_tasks_with_coverage_check(
-        self, iteration: int, max_retries: int = 3
+    async def _generate_tasks_with_coverage_warning(
+        self, iteration: int
     ) -> list[Task]:
-        """Generate tasks and retry if coverage is incomplete."""
-        coverage_feedback: str | None = None
-        tasks: list[Task] = []
-        uncovered: list[str] = []
+        """Generate tasks and warn if coverage is incomplete.
 
-        for attempt in range(max_retries):
-            tasks = await self._generate_tasks(iteration, coverage_feedback)
-            if not tasks:
-                return []
+        Coverage check is informational only - requirement verification loop
+        will catch any missing requirements in subsequent iterations.
+        """
+        tasks = await self._generate_tasks(iteration)
+        if not tasks:
+            return []
 
-            all_covered, uncovered = check_coverage(self.requirements, tasks)
-            if all_covered:
-                return tasks
-
-            logger.info(
-                f"Coverage check failed (attempt {attempt + 1}/{max_retries}): "
-                f"uncovered criteria: {uncovered}"
-            )
-            coverage_feedback = (
-                f"以下のacceptance criteriaがvalidationでカバーされていません: {uncovered}. "
-                "各validationのcoversフィールドで全criteriaを網羅してください。"
+        all_covered, uncovered = check_coverage(self.requirements, tasks)
+        if not all_covered:
+            logger.warning(
+                f"Coverage incomplete: {len(uncovered)} criteria not explicitly covered "
+                f"by task validations: {uncovered}. "
+                "These may be addressed in subsequent iterations via requirement verification."
             )
 
-        logger.warning(f"Max coverage retries reached. Uncovered: {uncovered}")
-        return tasks  # Return last attempt even if incomplete
+        return tasks
 
-    async def _generate_tasks(
-        self, iteration: int, coverage_feedback: str | None = None
-    ) -> list[Task]:
+    async def _generate_tasks(self, iteration: int) -> list[Task]:
         """Generate tasks using LLM."""
         assert self.history is not None
-        if iteration == 0 and not coverage_feedback:
+        if iteration == 0:
             prompt = build_task_generation_prompt(self.requirements)
         else:
             previous_verification = (
@@ -644,18 +635,15 @@ class RequirementsOrchestrator:
                 if self.history.iterations
                 else None
             )
-            feedback_parts = []
-            if previous_verification:
-                feedback_parts.append(
-                    previous_verification.get("feedback_for_additional_tasks", "")
-                )
-            if coverage_feedback:
-                feedback_parts.append(coverage_feedback)
-            feedback = "\n".join(filter(None, feedback_parts)) or None
+            feedback = (
+                previous_verification.get("feedback_for_additional_tasks", "")
+                if previous_verification
+                else None
+            )
 
             prompt = build_task_generation_prompt(
                 self.requirements,
-                completed_tasks=self.all_completed_tasks if iteration > 0 else None,
+                completed_tasks=self.all_completed_tasks,
                 previous_feedback=feedback,
             )
 
