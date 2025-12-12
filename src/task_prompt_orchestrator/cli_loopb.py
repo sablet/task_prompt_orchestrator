@@ -360,7 +360,7 @@ def _build_loopb_config(args: argparse.Namespace) -> RequirementsOrchestratorCon
     """Build RequirementsOrchestratorConfig from parsed arguments."""
     cwd = args.cwd or str(Path.cwd())
 
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "Task"]
     if not args.no_web:
         allowed_tools.extend(["WebFetch", "WebSearch"])
 
@@ -526,7 +526,7 @@ async def resume_loopb(args: argparse.Namespace) -> int:
     requirements = RequirementDefinition.from_yaml(history.requirements_path)
 
     # Build config (use saved config where possible, allow overrides)
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "Task"]
     if not args.no_web:
         allowed_tools.extend(["WebFetch", "WebSearch"])
 

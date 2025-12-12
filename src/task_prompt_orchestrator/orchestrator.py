@@ -65,6 +65,7 @@ class OrchestratorConfig:
             "Glob",
             "Grep",
             "NotebookEdit",
+            "Task",
             "WebFetch",
             "WebSearch",
         ]
@@ -302,16 +303,24 @@ def is_permission_error(feedback: str) -> bool:
 
 def _format_tool_info(block: ToolUseBlock) -> str:
     """Format tool use block info for display."""
-    tool_info = f"\n{CYAN}▶ {block.name}{RESET}"
-    if block.name not in {"Bash", "Read", "Write", "Edit"}:
-        return tool_info + "\n"
+    tool_info = f"{CYAN}▶ {block.name}{RESET}"
     inp = block.input
     if not isinstance(inp, dict):
         return tool_info + "\n"
-    if "command" in inp:
-        tool_info += f" {DIM}{inp['command'][:80]}{RESET}"
-    elif "file_path" in inp:
-        tool_info += f" {DIM}{inp['file_path']}{RESET}"
+    # Extract relevant info based on tool type
+    detail = None
+    if "command" in inp:  # Bash
+        detail = inp["command"][:80]
+    elif "file_path" in inp:  # Read, Write, Edit
+        detail = inp["file_path"]
+    elif "pattern" in inp:  # Glob, Grep
+        detail = inp["pattern"][:60]
+        if "path" in inp:
+            detail += f" in {inp['path']}"
+    elif "prompt" in inp:  # Task
+        detail = inp["prompt"]
+    if detail:
+        tool_info += f" {DIM}{detail}{RESET}"
     return tool_info + "\n"
 
 
@@ -324,7 +333,11 @@ def _process_text_block(
     """Process a text block from assistant message."""
     output_parts.append(block.text)
     if stream:
-        callback(block.text)
+        text = block.text
+        # テキストとコマンドの間に空行を入れる
+        if text and not text.endswith("\n\n"):
+            text = text.rstrip("\n") + "\n\n"
+        callback(text)
 
 
 def _process_tool_result(

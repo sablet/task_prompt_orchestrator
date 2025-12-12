@@ -672,6 +672,12 @@ class RequirementsOrchestrator:
             )
 
         config = self.config.orchestrator_config
+        callback = self._get_callback()
+        if config.stream_output:
+            callback(f"\n{BOLD}{'=' * 60}{RESET}\n")
+            callback(f"{DIM}>>> PROMPT >>>{RESET}\n")
+            callback(f"{DIM}{prompt}{RESET}\n")
+            callback(f"{DIM}<<< END PROMPT <<<{RESET}\n\n")
         output = await run_claude_query(prompt, config, phase="task_generation")
         tasks = parse_generated_tasks(output)
 
@@ -826,6 +832,12 @@ class RequirementsOrchestrator:
             self.requirements, approved_results
         )
         config = self.config.orchestrator_config
+        callback = self._get_callback()
+        if config.stream_output:
+            callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
+            callback(f"{DIM}>>> PROMPT >>>{RESET}\n")
+            callback(f"{DIM}{prompt}{RESET}\n")
+            callback(f"{DIM}<<< END PROMPT <<<{RESET}\n\n")
         output = await run_claude_query(prompt, config, phase="verification")
         result = parse_verification_result(output)
 

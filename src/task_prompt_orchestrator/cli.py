@@ -251,7 +251,7 @@ def build_orchestrator_config(args: argparse.Namespace) -> OrchestratorConfig:
     """Build OrchestratorConfig from parsed arguments."""
     cwd = args.cwd or str(Path.cwd())
 
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit"]
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "Task"]
     if not args.no_web:
         allowed_tools.extend(["WebFetch", "WebSearch"])
 
