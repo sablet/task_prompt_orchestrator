@@ -74,6 +74,14 @@ class RequirementsOrchestratorConfig:
         }
 
 
+class StepModeStop(Exception):
+    """Raised when step mode stops Loop B execution."""
+
+    def __init__(self, phase: str):
+        self.phase = phase
+        super().__init__(f"Step mode: stopped after {phase}")
+
+
 class LoopBHistoryManager:
     """Manages Loop B execution history persistence."""
 
@@ -253,38 +261,50 @@ class RequirementsOrchestrator:
         skip_task_generation = resume_info["skip_task_generation"]
         resume_loop_c = resume_info["resume_loop_c"]
 
-        for iteration in range(start_iteration, self.config.max_iterations):
-            self._print_loop_header(iteration)
-            # Only skip task generation on the first iteration of resume
-            do_skip_task_gen = skip_task_generation and iteration == start_iteration
+        try:
+            for iteration in range(start_iteration, self.config.max_iterations):
+                self._print_loop_header(iteration)
+                # Only skip task generation on the first iteration of resume
+                do_skip_task_gen = skip_task_generation and iteration == start_iteration
 
-            # Step 1 & 2: Get or generate tasks
-            tasks, tasks_yaml_path = await self._get_or_generate_tasks(
-                iteration, do_skip_task_gen
-            )
-            if tasks is None:
-                break  # _fail already called
+                # Step 1 & 2: Get or generate tasks
+                tasks, tasks_yaml_path = await self._get_or_generate_tasks(
+                    iteration, do_skip_task_gen
+                )
+                if tasks is None:
+                    break  # _fail already called
 
-            # Step 3: Execute Loop C
-            should_resume_loop_c = resume_loop_c and iteration == start_iteration
-            loop_c_result, loop_c_history_id = await self._run_loop_c_step(
-                iteration, tasks_yaml_path, should_resume_loop_c, num_tasks=len(tasks)
-            )
+                # Step 3: Execute Loop C
+                should_resume_loop_c = resume_loop_c and iteration == start_iteration
+                loop_c_result, loop_c_history_id = await self._run_loop_c_step(
+                    iteration, tasks_yaml_path, should_resume_loop_c, num_tasks=len(tasks)
+                )
 
-            # Update completed tasks
-            self._update_completed_tasks(tasks, loop_c_result)
+                # Update completed tasks
+                self._update_completed_tasks(tasks, loop_c_result)
 
-            # Update current_iteration after Loop C completes (if we skipped earlier)
-            if do_skip_task_gen:
-                self.history.current_iteration = iteration + 1
-                self._save_history()
+                # Check if Loop C stopped due to step mode
+                if loop_c_result.step_stopped:
+                    logger.info("Step mode: Loop C stopped, pausing Loop B")
+                    self._save_history()
+                    return self.history
 
-            # Step 4: Verify requirements and record iteration
-            should_break = await self._verify_and_record_iteration(
-                iteration, tasks_yaml_path, loop_c_history_id
-            )
-            if should_break:
-                break
+                # Update current_iteration after Loop C completes (if we skipped earlier)
+                if do_skip_task_gen:
+                    self.history.current_iteration = iteration + 1
+                    self._save_history()
+
+                # Step 4: Verify requirements and record iteration
+                should_break = await self._verify_and_record_iteration(
+                    iteration, tasks_yaml_path, loop_c_history_id
+                )
+                if should_break:
+                    break
+
+        except StepModeStop as e:
+            logger.info(f"Step mode: stopped after {e.phase}")
+            self._save_history()
+            return self.history
 
         return self.history
 
@@ -625,7 +645,11 @@ class RequirementsOrchestrator:
         return tasks
 
     async def _generate_tasks(self, iteration: int) -> list[Task]:
-        """Generate tasks using LLM."""
+        """Generate tasks using LLM.
+
+        Raises:
+            StepModeStop: If step mode is enabled and a step was executed.
+        """
         assert self.history is not None
         if iteration == 0:
             prompt = build_task_generation_prompt(self.requirements)
@@ -647,10 +671,18 @@ class RequirementsOrchestrator:
                 previous_feedback=feedback,
             )
 
-        output = await run_claude_query(
-            prompt, self.config.orchestrator_config, phase="task_generation"
-        )
-        return parse_generated_tasks(output)
+        config = self.config.orchestrator_config
+        output = await run_claude_query(prompt, config, phase="task_generation")
+        tasks = parse_generated_tasks(output)
+
+        # Step mode check after task generation
+        if config.step_mode and config._step_executed:
+            # Write tasks before stopping so they can be resumed
+            if tasks:
+                self._write_tasks_yaml(tasks, iteration)
+            raise StepModeStop("task_generation")
+
+        return tasks
 
     def _write_tasks_yaml(self, tasks: list[Task], iteration: int) -> str:
         """Write generated tasks to YAML file."""
@@ -780,7 +812,11 @@ class RequirementsOrchestrator:
             self.all_task_results.append(task_result)
 
     async def _verify_requirements(self) -> dict[str, Any]:
-        """Verify if requirements are met."""
+        """Verify if requirements are met.
+
+        Raises:
+            StepModeStop: If step mode is enabled and a step was executed.
+        """
         # Filter to only approved task results
         approved_results = [
             r for r in self.all_task_results if r.status == TaskStatus.APPROVED
@@ -789,10 +825,15 @@ class RequirementsOrchestrator:
         prompt = build_requirement_verification_prompt(
             self.requirements, approved_results
         )
-        output = await run_claude_query(
-            prompt, self.config.orchestrator_config, phase="verification"
-        )
-        return parse_verification_result(output)
+        config = self.config.orchestrator_config
+        output = await run_claude_query(prompt, config, phase="verification")
+        result = parse_verification_result(output)
+
+        # Step mode check after verification
+        if config.step_mode and config._step_executed:
+            raise StepModeStop("verification")
+
+        return result
 
 
 async def run_requirements_orchestrator(

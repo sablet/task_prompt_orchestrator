@@ -338,8 +338,17 @@ def output_loopb_result(
         logger.info("All requirements fulfilled!")
         return 0
 
-    logger.error(f"Loop B failed: {history.error or history.status.value}")
-    return 1
+    if history.status == LoopBStatus.FAILED:
+        logger.error(f"Loop B failed: {history.error or 'Unknown error'}")
+        return 1
+
+    # Step mode or other non-terminal state: success (can be resumed)
+    step_mode = getattr(args, "step", False)
+    if step_mode:
+        logger.info(f"Step mode: paused at {history.status.value}")
+    else:
+        logger.info(f"Loop B paused at {history.status.value} (can be resumed)")
+    return 0
 
 
 # =============================================================================
@@ -356,6 +365,7 @@ def _build_loopb_config(args: argparse.Namespace) -> RequirementsOrchestratorCon
         allowed_tools.extend(["WebFetch", "WebSearch"])
 
     permission_mode = "bypassPermissions" if args.bypass_permissions else "acceptEdits"
+    step_mode = getattr(args, "step", False)
 
     orchestrator_config = OrchestratorConfig(
         max_retries_per_task=args.max_retries,
@@ -364,6 +374,7 @@ def _build_loopb_config(args: argparse.Namespace) -> RequirementsOrchestratorCon
         model=args.model,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
+        step_mode=step_mode,
     )
 
     return RequirementsOrchestratorConfig(

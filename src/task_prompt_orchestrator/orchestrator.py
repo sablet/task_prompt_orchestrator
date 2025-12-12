@@ -74,6 +74,8 @@ class OrchestratorConfig:
     permission_mode: str = "acceptEdits"
     stream_output: bool = True
     stream_callback: Callable[[str], None] | None = None
+    step_mode: bool = False
+    _step_executed: bool = False  # Internal flag to track if a step was executed
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize config for history storage."""
@@ -84,6 +86,7 @@ class OrchestratorConfig:
             "cwd": self.cwd,
             "model": self.model,
             "permission_mode": self.permission_mode,
+            "step_mode": self.step_mode,
         }
 
 
@@ -336,10 +339,23 @@ def _process_tool_result(
     callback(f"{DIM}  └─ {content_str}{RESET}\n")
 
 
+class StepModeInterrupt(Exception):
+    """Raised when step mode requires stopping after a claude query."""
+
+    def __init__(self, output: str, phase: str = ""):
+        self.output = output
+        self.phase = phase
+        super().__init__(f"Step mode: stopped after {phase}")
+
+
 async def run_claude_query(
     prompt: str, config: OrchestratorConfig, phase: str = ""
 ) -> str:
-    """Run a single Claude Code query and return text output with streaming."""
+    """Run a single Claude Code query and return text output with streaming.
+
+    Raises:
+        StepModeInterrupt: If step_mode is True, raised after query completes.
+    """
     options = ClaudeAgentOptions(
         allowed_tools=config.allowed_tools,
         permission_mode=config.permission_mode,
@@ -370,7 +386,13 @@ async def run_claude_query(
     if stream:
         callback("\n")
 
-    return "\n".join(output_parts)
+    output = "\n".join(output_parts)
+
+    # Step mode: mark that a step was executed
+    if config.step_mode:
+        config._step_executed = True
+
+    return output
 
 
 async def execute_instruction_phase(
@@ -431,6 +453,14 @@ async def execute_validation_phase(
     return validation_output, approved, feedback
 
 
+@dataclass
+class StepResult:
+    """Result when step mode stops execution."""
+
+    task_result: TaskResult
+    stopped_after: str  # "instruction" or "validation"
+
+
 async def execute_task(
     task: Task,
     config: OrchestratorConfig,
@@ -440,12 +470,15 @@ async def execute_task(
     previous_feedback: str | None = None,
     skip_instruction: bool = False,
     existing_instruction_output: str | None = None,
-) -> TaskResult:
+) -> TaskResult | StepResult:
     """Execute a single task with instruction and validation.
 
     Args:
         skip_instruction: If True, skip instruction phase and use existing_instruction_output
         existing_instruction_output: Pre-existing instruction output for resume from validation
+
+    Returns:
+        TaskResult on normal completion, StepResult if step mode stopped execution.
     """
     result = TaskResult(task_id=task.id, status=TaskStatus.IN_PROGRESS)
     callback = config.stream_callback or default_stream_callback
@@ -464,6 +497,12 @@ async def execute_task(
             result.instruction_output = await execute_instruction_phase(
                 task, config, task_number, total_tasks, attempt, previous_feedback
             )
+            # Step mode: stop after instruction
+            if config.step_mode and config._step_executed:
+                logger.info(f"Step mode: stopping after instruction for task {task.id}")
+                if stream:
+                    callback(f"\n{YELLOW}⏸ STEP MODE: stopped after instruction{RESET}\n")
+                return StepResult(task_result=result, stopped_after="instruction")
 
         validation_output, approved, feedback = await execute_validation_phase(
             task, config, task_number, total_tasks, result.instruction_output
@@ -485,6 +524,14 @@ async def execute_task(
             result.error = feedback
             if stream:
                 callback(f"\n{YELLOW}❌ DECLINED: {feedback}{RESET}\n")
+
+        # Step mode: stop after validation (even if approved)
+        if config.step_mode and config._step_executed:
+            logger.info(f"Step mode: stopping after validation for task {task.id}")
+            if stream:
+                callback(f"\n{YELLOW}⏸ STEP MODE: stopped after validation{RESET}\n")
+            return StepResult(task_result=result, stopped_after="validation")
+
     except Exception as e:
         result.status = TaskStatus.FAILED
         result.error = str(e)
@@ -646,14 +693,15 @@ async def _execute_task_with_retries(
     history: ExecutionHistory | None,
     history_manager: HistoryManager | None,
     resume_point: ResumePoint | None,
-) -> tuple[TaskResult | None, str | None]:
+) -> tuple[TaskResult | StepResult | None, str | None]:
     """Execute a single task with retry logic.
 
     Returns (result, error_summary) - error_summary is set if max retries exceeded.
+    StepResult is returned if step mode stopped execution.
     """
     attempts = 0
     feedback: str | None = None
-    result: TaskResult | None = None
+    result: TaskResult | StepResult | None = None
     first_attempt = True
     skip_instruction = state.skip_to_validation
     instruction_output = state.existing_instruction_output
@@ -689,7 +737,7 @@ async def _execute_task_with_retries(
             history_manager.save_history(history)
 
         logger.info(f"Task {task.id}: attempt {attempts}/{config.max_retries_per_task}")
-        result = await execute_task(
+        exec_result = await execute_task(
             task,
             config,
             task_number=task_index,
@@ -699,6 +747,23 @@ async def _execute_task_with_retries(
             skip_instruction=should_skip,
             existing_instruction_output=instruction_output if should_skip else None,
         )
+
+        # Handle StepResult (step mode stopped execution)
+        if isinstance(exec_result, StepResult):
+            exec_result.task_result.attempts = attempts
+            _update_history_result(
+                history, history_manager, exec_result.task_result, state.total_attempts
+            )
+            # Update history phase based on where we stopped
+            if history and history_manager:
+                if exec_result.stopped_after == "instruction":
+                    history.current_phase = ExecutionPhase.VALIDATION.value
+                else:
+                    history.current_phase = ExecutionPhase.INSTRUCTION.value
+                history_manager.save_history(history)
+            return exec_result, None
+
+        result = exec_result
         result.attempts = attempts
 
         _update_history_result(history, history_manager, result, state.total_attempts)
@@ -796,6 +861,20 @@ async def run_orchestrator(
                 success=False,
                 total_attempts=state.total_attempts,
                 summary=error_summary,
+            )
+
+        # Handle StepResult (step mode stopped execution)
+        if isinstance(result, StepResult):
+            _update_task_results(state.task_results, result.task_result)
+            logger.info(
+                f"Step mode: stopping after {result.stopped_after} for task {task.id}"
+            )
+            return OrchestratorResult(
+                task_results=state.task_results,
+                success=True,
+                total_attempts=state.total_attempts,
+                summary=f"Step mode: stopped after {result.stopped_after} for task {task.id}",
+                step_stopped=True,
             )
 
         if result:

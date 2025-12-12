@@ -119,6 +119,7 @@ task-orchestrator sample > /tmp/tasks.yaml
 | `--loopb` | 強制的にLoop Bモードで実行（通常は自動判定） |
 | `--max-retries N` | タスクあたりの最大リトライ回数 (default: 3) |
 | `--max-total-retries N` | 全体の最大リトライ回数 (default: 10) |
+| `--step` | 1ステップ実行後に停止（Claude Code呼び出し単位） |
 | `--cwd PATH` | 作業ディレクトリ |
 | `--model MODEL` | 使用モデル |
 | `--no-web` | WebFetch/WebSearch無効化 |
@@ -204,6 +205,27 @@ rm .task-orchestrator-history/loopb/<history_id>.json
 # 全履歴クリア（新規実行したい場合）
 rm -rf .task-orchestrator-history
 ```
+
+## ステップ実行 (`--step`)
+
+`--step`オプションを使うと、Claude Code呼び出し1回ごとに実行を停止する。デバッグや段階的な確認に有用。
+
+```bash
+# 1ステップだけ実行
+task-orchestrator run tasks.yaml --step
+
+# 続きを実行（また1ステップで停止）
+task-orchestrator run tasks.yaml --step
+```
+
+### ステップの単位
+
+| モード | ステップ単位 |
+|--------|-------------|
+| Loop C | instruction実行、validation実行 |
+| Loop B | タスク生成、Loop C内の各instruction/validation、verification |
+
+履歴は自動保存されるため、`--step`で停止後も同じコマンドで続きから再開できる。
 
 ## Permission Mode
 

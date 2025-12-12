@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from task_prompt_orchestrator.orchestrator import OrchestratorConfig
+from task_prompt_orchestrator.orchestrator import (
+    OrchestratorConfig,
+    StepResult,
+    execute_task,
+    run_orchestrator,
+)
 from task_prompt_orchestrator.requirements_orchestrator import (
     LoopBHistoryManager,
     RequirementsOrchestrator,
@@ -17,6 +22,8 @@ from task_prompt_orchestrator.schema import (
     OrchestratorResult,
     Requirement,
     RequirementDefinition,
+    Task,
+    TaskDefinition,
     TaskResult,
     TaskStatus,
     YamlType,
@@ -699,3 +706,318 @@ tasks:
             )  # Start at iteration 2 (0-indexed = 1)
             assert resume_info["skip_task_generation"] is False
             assert resume_info["resume_loop_c"] is False
+
+
+class TestStepModeLoopC:
+    """Test --step mode for Loop C: stops after each claude code call."""
+
+    @staticmethod
+    def _make_mock_claude_query(return_value: str):
+        """Create a mock that sets _step_executed flag like the real function."""
+
+        async def mock_query(prompt, config, phase=""):
+            config._step_executed = True
+            return return_value
+
+        return mock_query
+
+    @pytest.mark.asyncio
+    async def test_step_mode_stops_after_instruction(self) -> None:
+        """Step mode should stop after instruction phase (first claude call)."""
+        task = Task(
+            id="task_1",
+            name="Test Task",
+            instruction="Do something",
+            validation=["Check result"],
+        )
+        config = OrchestratorConfig(
+            stream_output=False,
+            step_mode=True,
+        )
+
+        # Mock run_claude_query to simulate instruction execution
+        with patch(
+            "task_prompt_orchestrator.orchestrator.run_claude_query",
+            new_callable=AsyncMock,
+            side_effect=self._make_mock_claude_query("Instruction output"),
+        ) as mock_query:
+            result = await execute_task(task, config)
+
+        # Should return StepResult after instruction
+        assert isinstance(result, StepResult)
+        assert result.stopped_after == "instruction"
+        assert result.task_result.instruction_output == "Instruction output"
+        assert result.task_result.validation_output is None
+        # Only instruction query should be called
+        assert mock_query.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_step_mode_stops_after_validation_on_resume(self) -> None:
+        """Step mode should stop after validation phase when resuming from validation."""
+        task = Task(
+            id="task_1",
+            name="Test Task",
+            instruction="Do something",
+            validation=["Check result"],
+        )
+        config = OrchestratorConfig(
+            stream_output=False,
+            step_mode=True,
+        )
+        # Reset step_executed flag (simulating fresh start for this phase)
+        config._step_executed = False
+
+        # Mock run_claude_query for validation
+        with patch(
+            "task_prompt_orchestrator.orchestrator.run_claude_query",
+            new_callable=AsyncMock,
+            side_effect=self._make_mock_claude_query('{"approved": true, "feedback": ""}'),
+        ) as mock_query:
+            result = await execute_task(
+                task,
+                config,
+                skip_instruction=True,
+                existing_instruction_output="Previous instruction output",
+            )
+
+        # Should return StepResult after validation
+        assert isinstance(result, StepResult)
+        assert result.stopped_after == "validation"
+        assert result.task_result.instruction_output == "Previous instruction output"
+        assert result.task_result.validation_output is not None
+        assert result.task_result.validation_approved is True
+        # Only validation query should be called
+        assert mock_query.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_run_orchestrator_step_mode(self) -> None:
+        """run_orchestrator should return step_stopped=True when step mode stops execution."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create tasks YAML
+            tasks_path = Path(temp_dir) / "tasks.yaml"
+            tasks_path.write_text("""tasks:
+  - id: task_1
+    name: Task 1
+    instruction: Do task 1
+    validation:
+      - Check it worked
+  - id: task_2
+    name: Task 2
+    instruction: Do task 2
+    validation:
+      - Check it worked
+""")
+
+            task_def = TaskDefinition.from_yaml(str(tasks_path))
+            config = OrchestratorConfig(
+                stream_output=False,
+                step_mode=True,
+            )
+
+            # Mock run_claude_query with step_executed flag setting
+            with patch(
+                "task_prompt_orchestrator.orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                side_effect=self._make_mock_claude_query("Output"),
+            ):
+                result = await run_orchestrator(task_def, config)
+
+            # Should stop after first claude call
+            assert result.step_stopped is True
+            assert result.success is True
+            assert "Step mode" in result.summary
+            # Only task_1's instruction should have been attempted
+            assert len(result.task_results) == 1
+            assert result.task_results[0].task_id == "task_1"
+
+
+class TestStepModeLoopB:
+    """Test --step mode for Loop B: stops after each claude code call."""
+
+    @pytest.mark.asyncio
+    async def test_step_mode_stops_after_task_generation(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
+        """Step mode should stop after task generation phase."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create requirements file
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            tasks_dir = Path(temp_dir) / "tasks"
+            config = RequirementsOrchestratorConfig(
+                max_iterations=3,
+                tasks_output_dir=str(tasks_dir),
+                orchestrator_config=OrchestratorConfig(
+                    stream_output=False,
+                    step_mode=True,
+                ),
+            )
+
+            manager = LoopBHistoryManager(temp_dir)
+            orchestrator = RequirementsOrchestrator(
+                requirements=sample_requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Mock run_claude_query for task generation
+            with patch(
+                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                return_value=make_task_response(),
+            ) as mock_query:
+                result = await orchestrator.run()
+
+            # Should stop after task generation (first claude call)
+            # Status should NOT be COMPLETED or FAILED
+            assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
+            # Task generation should have been called once
+            assert mock_query.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_step_mode_stops_after_loop_c_step(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
+        """Step mode should stop when Loop C stops due to step mode."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create requirements file
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            tasks_dir = Path(temp_dir) / "tasks"
+            # Step mode disabled for task generation, we want to test Loop C stopping
+            config = RequirementsOrchestratorConfig(
+                max_iterations=3,
+                tasks_output_dir=str(tasks_dir),
+                orchestrator_config=OrchestratorConfig(
+                    stream_output=False,
+                    step_mode=False,  # Disabled initially
+                ),
+            )
+
+            manager = LoopBHistoryManager(temp_dir)
+            orchestrator = RequirementsOrchestrator(
+                requirements=sample_requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            # Mock claude query for task generation (no step mode)
+            # Then mock run_orchestrator to return step_stopped
+            call_count = {"task_gen": 0, "loop_c": 0}
+
+            async def mock_claude_query(prompt, cfg, phase=""):
+                call_count["task_gen"] += 1
+                return make_task_response()
+
+            async def mock_run_orchestrator(*args, **kwargs):
+                call_count["loop_c"] += 1
+                # Simulate Loop C stopping due to step mode
+                return OrchestratorResult(
+                    success=True,
+                    task_results=[
+                        TaskResult(task_id="task_1", status=TaskStatus.IN_PROGRESS)
+                    ],
+                    total_attempts=1,
+                    summary="Step mode: stopped",
+                    step_stopped=True,
+                )
+
+            with patch(
+                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                side_effect=mock_claude_query,
+            ):
+                with patch(
+                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    new_callable=AsyncMock,
+                    side_effect=mock_run_orchestrator,
+                ):
+                    result = await orchestrator.run()
+
+            # Should stop after Loop C returns step_stopped
+            assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
+            # Task generation and Loop C should have been called
+            assert call_count["task_gen"] == 1
+            assert call_count["loop_c"] == 1
+
+    @pytest.mark.asyncio
+    async def test_step_mode_stops_after_verification(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
+        """Step mode should stop after verification phase."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create requirements file
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+            )
+
+            tasks_dir = Path(temp_dir) / "tasks"
+            config = RequirementsOrchestratorConfig(
+                max_iterations=3,
+                tasks_output_dir=str(tasks_dir),
+                orchestrator_config=OrchestratorConfig(
+                    stream_output=False,
+                    step_mode=False,  # We'll enable it for verification
+                ),
+            )
+
+            manager = LoopBHistoryManager(temp_dir)
+            orchestrator = RequirementsOrchestrator(
+                requirements=sample_requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            call_count = {"task_gen": 0, "verification": 0, "loop_c": 0}
+
+            async def mock_claude_query(prompt, cfg, phase=""):
+                if phase == "task_generation":
+                    call_count["task_gen"] += 1
+                    return make_task_response()
+                else:
+                    call_count["verification"] += 1
+                    # Enable step mode for verification
+                    cfg.step_mode = True
+                    cfg._step_executed = True
+                    return make_verify_response(False, ["req_2"])
+
+            async def mock_run_orchestrator(*args, **kwargs):
+                call_count["loop_c"] += 1
+                return OrchestratorResult(
+                    success=True,
+                    task_results=[
+                        TaskResult(task_id="task_1", status=TaskStatus.APPROVED)
+                    ],
+                    total_attempts=1,
+                    summary="Done",
+                    step_stopped=False,
+                )
+
+            with patch(
+                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                side_effect=mock_claude_query,
+            ):
+                with patch(
+                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    new_callable=AsyncMock,
+                    side_effect=mock_run_orchestrator,
+                ):
+                    result = await orchestrator.run()
+
+            # Should stop after verification (StepModeStop raised)
+            assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
+            # Task gen, Loop C, and verification should have been called
+            assert call_count["task_gen"] == 1
+            assert call_count["loop_c"] == 1
+            assert call_count["verification"] == 1

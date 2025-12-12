@@ -98,6 +98,11 @@ def _add_retry_args(parser: argparse.ArgumentParser) -> None:
         default=10,
         help="Max total retries across all tasks (default: 10)",
     )
+    parser.add_argument(
+        "--step",
+        action="store_true",
+        help="Execute only one step and stop (one task for Loop C, one iteration for Loop B)",
+    )
 
 
 def _add_loopb_flag(parser: argparse.ArgumentParser) -> None:
@@ -251,6 +256,7 @@ def build_orchestrator_config(args: argparse.Namespace) -> OrchestratorConfig:
         allowed_tools.extend(["WebFetch", "WebSearch"])
 
     permission_mode = "bypassPermissions" if args.bypass_permissions else "acceptEdits"
+    step_mode = getattr(args, "step", False)
 
     return OrchestratorConfig(
         max_retries_per_task=args.max_retries,
@@ -259,6 +265,7 @@ def build_orchestrator_config(args: argparse.Namespace) -> OrchestratorConfig:
         model=args.model,
         allowed_tools=allowed_tools,
         permission_mode=permission_mode,
+        step_mode=step_mode,
     )
 
 
@@ -591,11 +598,14 @@ async def resume_loopc(args: argparse.Namespace) -> int:
         {"resumed_from": str(resume_point), "history_id": history.history_id},
     )
 
+    if result.step_stopped:
+        logger.info(f"Step mode: {result.summary}")
+        return 0
     if result.success:
         logger.info("All tasks completed successfully!")
-    else:
-        logger.error(f"Orchestration failed: {result.summary}")
-    return 0 if result.success else 1
+        return 0
+    logger.error(f"Orchestration failed: {result.summary}")
+    return 1
 
 
 # =============================================================================
@@ -640,6 +650,9 @@ async def run_loopc(args: argparse.Namespace) -> int:
 
     output_results(result, args.output)
 
+    if result.step_stopped:
+        logger.info(f"Step mode: {result.summary}")
+        return 0
     if result.success:
         logger.info("All tasks completed successfully!")
         return 0

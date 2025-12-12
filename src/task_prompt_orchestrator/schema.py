@@ -109,6 +109,7 @@ class OrchestratorResult:
     success: bool
     total_attempts: int
     summary: str
+    step_stopped: bool = False  # True if stopped due to --step mode
 
 
 @dataclass
