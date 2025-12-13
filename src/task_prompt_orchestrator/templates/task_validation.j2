@@ -10,8 +10,15 @@ The following instruction was executed:
 {% for criterion in validation_criteria %}
 - {{ criterion }}
 {% endfor %}
+{% if common_validation %}
 
-Please verify ALL of the above validation criteria are met.
+### Common Quality Criteria (Required for ALL tasks):
+{% for criterion in common_validation %}
+- {{ criterion }}
+{% endfor %}
+{% endif %}
+
+Please verify ALL of the above validation criteria are met{% if common_validation %}, including the common quality criteria{% endif %}.
 
 Respond with a JSON object in the following format:
 ```json

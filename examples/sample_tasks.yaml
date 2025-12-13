@@ -1,5 +1,12 @@
-# Sample Task Definition for Task Prompt Orchestrator
+# Sample Task Definition for Task Prompt Orchestrator (Loop C)
 # This file demonstrates the YAML format for defining multi-step tasks
+#
+# common_validation: 全タスク共通の品質基準（タスク固有の validation に加えて適用）
+
+# 全タスク共通の品質基準
+common_validation:
+  - "make check が通過する"
+  - "make test が通過する"
 
 tasks:
   - id: task_1

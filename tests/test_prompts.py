@@ -4,6 +4,7 @@ import pytest
 
 from task_prompt_orchestrator.prompts import (
     build_requirement_verification_prompt,
+    build_single_requirement_verification_prompt,
     build_task_generation_prompt,
     get_unmet_requirement_ids,
     parse_generated_tasks,
@@ -128,20 +129,21 @@ class TestBuildPrompts:
 
     def test_task_generation_prompts(self) -> None:
         """Test initial and additional task generation prompts."""
-        requirements = RequirementDefinition(
-            requirements=[
-                Requirement(
-                    id="req_1",
-                    name="Test Requirement",
-                    acceptance_criteria=[
-                        AcceptanceCriterion(criterion="Done", verify="Check it works")
-                    ],
-                )
-            ],
-        )
+        unmet_requirements = [
+            Requirement(
+                id="req_1",
+                name="Test Requirement",
+                acceptance_criteria=[
+                    AcceptanceCriterion(criterion="Done", verify="Check it works")
+                ],
+            )
+        ]
+        all_requirements = unmet_requirements
 
         # Initial generation
-        prompt = build_task_generation_prompt(requirements)
+        prompt = build_task_generation_prompt(
+            unmet_requirements, all_requirements, common_validation=[]
+        )
         assert "req_1" in prompt
         assert "Test Requirement" in prompt
 
@@ -150,10 +152,107 @@ class TestBuildPrompts:
             Task(id="task_1", name="Done", instruction="Did", validation=["OK"])
         ]
         prompt_add = build_task_generation_prompt(
-            requirements, completed_tasks=completed, previous_feedback="Need more"
+            unmet_requirements,
+            all_requirements,
+            common_validation=[],
+            completed_tasks=completed,
+            previous_feedback="Need more",
         )
         assert "task_1" in prompt_add
         assert "Need more" in prompt_add
+
+    def test_task_generation_with_common_validation(self) -> None:
+        """Test that common_validation is included in task generation prompts."""
+        unmet_requirements = [
+            Requirement(
+                id="req_1",
+                name="Test Requirement",
+                acceptance_criteria=[
+                    AcceptanceCriterion(criterion="Done", verify="Check it")
+                ],
+            )
+        ]
+        all_requirements = unmet_requirements
+        common_validation = [
+            "make check が通過する",
+            "make test が通過する",
+        ]
+
+        # Initial generation should include common validation
+        prompt = build_task_generation_prompt(
+            unmet_requirements, all_requirements, common_validation
+        )
+        assert "共通品質基準" in prompt
+        assert "make check が通過する" in prompt
+        assert "make test が通過する" in prompt
+        assert "暗黙的に含まれる" in prompt
+
+        # Additional generation should also include common validation
+        completed = [
+            Task(id="task_1", name="Done", instruction="Did", validation=["OK"])
+        ]
+        prompt_add = build_task_generation_prompt(
+            unmet_requirements,
+            all_requirements,
+            common_validation,
+            completed_tasks=completed,
+            previous_feedback="Need more",
+        )
+        assert "共通品質基準" in prompt_add
+        assert "make check が通過する" in prompt_add
+
+    def test_task_generation_without_common_validation(self) -> None:
+        """Test that prompt works without common_validation."""
+        unmet_requirements = [
+            Requirement(
+                id="req_1",
+                name="Test Requirement",
+                acceptance_criteria=[
+                    AcceptanceCriterion(criterion="Done", verify="Check it")
+                ],
+            )
+        ]
+        all_requirements = unmet_requirements
+
+        prompt = build_task_generation_prompt(
+            unmet_requirements, all_requirements, common_validation=[]
+        )
+        assert "req_1" in prompt
+        # Should not include section when empty
+        assert "共通品質基準" not in prompt
+
+    def test_task_generation_with_context(self) -> None:
+        """Test that all_requirements context is included in prompt."""
+        unmet_requirements = [
+            Requirement(
+                id="req_report",
+                name="Report Generation",
+                acceptance_criteria=[
+                    AcceptanceCriterion(criterion="Generate report", verify="Check it")
+                ],
+            )
+        ]
+        all_requirements = unmet_requirements + [
+            Requirement(
+                id="req_env",
+                name="Environment Setup",
+                acceptance_criteria=[
+                    AcceptanceCriterion(
+                        criterion="output/test 配下で動作する", verify="Check path"
+                    )
+                ],
+            )
+        ]
+
+        prompt = build_task_generation_prompt(
+            unmet_requirements, all_requirements, common_validation=[]
+        )
+        # Context should include all requirements
+        assert "req_env" in prompt
+        assert "Environment Setup" in prompt
+        assert "output/test 配下で動作する" in prompt
+        # Target requirements should be included
+        assert "req_report" in prompt
 
     def test_verification_prompt(self) -> None:
         """Test verification prompt generation."""
@@ -174,3 +273,36 @@ class TestBuildPrompts:
         prompt = build_requirement_verification_prompt(requirements, results)
         assert "req_1" in prompt
         assert "task_1" in prompt
+
+    def test_single_requirement_verification_with_context(self) -> None:
+        """Test single requirement verification includes all_requirements context."""
+        target_req = Requirement(
+            id="req_report",
+            name="Report Generation",
+            acceptance_criteria=[
+                AcceptanceCriterion(criterion="Generate report", verify="Check it")
+            ],
+        )
+        all_requirements = [
+            target_req,
+            Requirement(
+                id="req_env",
+                name="Environment Setup",
+                acceptance_criteria=[
+                    AcceptanceCriterion(
+                        criterion="output/test 配下で動作する", verify="Check path"
+                    )
+                ],
+            ),
+        ]
+
+        prompt = build_single_requirement_verification_prompt(
+            target_req, all_requirements
+        )
+        # Context should include all requirements
+        assert "req_env" in prompt
+        assert "Environment Setup" in prompt
+        assert "output/test 配下で動作する" in prompt
+        # Target requirement should be included
+        assert "req_report" in prompt
+        assert "Report Generation" in prompt

@@ -153,57 +153,67 @@ class TestRequirementsOrchestrator:
     async def test_iteration_scenarios(
         self, sample_requirements: RequirementDefinition
     ) -> None:
-        """Test single iteration success, multiple iterations, and max iterations failure."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Scenario 1: Single iteration success
-            # Flow: task_gen -> verify req_1 -> verify req_2
-            orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
-            with self._mock_claude_and_loopc(
-                [
-                    make_task_response(),
-                    make_single_verify_response("req_1", True),
-                    make_single_verify_response("req_2", True),
-                ],
-                [make_mock_result(["task_1"])],
-            ):
-                result = await orchestrator.run()
-            assert result.status == LoopBStatus.COMPLETED
-            assert result.current_iteration == 1
-            assert "task_1" in result.completed_task_ids
+        """Test single iteration success, multiple iterations, and max iterations failure.
 
-            # Scenario 2: Two iterations until success
-            # Flow: task_gen -> verify(fail) -> task_gen -> verify(pass)
+        New flow (pre-verification first):
+        - Iter start: Pre-verify all reqs -> Get unmet list
+        - If all met: Complete
+        - Else: Task gen (for unmet only) -> LoopC -> Next iter
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Scenario 1: All requirements already met at start
+            # Flow: pre-verify req_1 (met) -> pre-verify req_2 (met) -> Complete
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             with self._mock_claude_and_loopc(
                 [
-                    make_task_response("t1"),
-                    make_single_verify_response("req_1", True),
-                    make_single_verify_response("req_2", False),  # Fails
-                    make_task_response("t2"),
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", True),
                 ],
-                [make_mock_result(["t1"]), make_mock_result(["t2"])],
+                [],  # No LoopC execution
             ):
                 result = await orchestrator.run()
             assert result.status == LoopBStatus.COMPLETED
-            assert result.current_iteration == 2
-            assert set(result.completed_task_ids) == {"t1", "t2"}
+            # No tasks were executed since requirements were already met
+            assert result.completed_task_ids == []
+
+            # Scenario 2: Some requirements unmet, then met after one iteration
+            # Flow: pre-verify (req_2 unmet) -> task_gen -> LoopC
+            #    -> iter2: pre-verify (all met) -> Complete
+            orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
+            with self._mock_claude_and_loopc(
+                [
+                    # Iter 1: pre-verification
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", False),  # Unmet
+                    make_task_response("t1"),  # Task gen for req_2
+                    # Iter 2: pre-verification
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", True),  # Now met
+                ],
+                [make_mock_result(["t1"])],
+            ):
+                result = await orchestrator.run()
+            assert result.status == LoopBStatus.COMPLETED
+            assert "t1" in result.completed_task_ids
 
             # Scenario 3: Max iterations reached
+            # Flow: pre-verify (unmet) -> task -> LoopC -> pre-verify (still unmet) -> task -> LoopC -> fail
             orchestrator = self._create_orchestrator(
                 sample_requirements, temp_dir, max_iter=2
             )
             with self._mock_claude_and_loopc(
                 [
-                    make_task_response(),
+                    # Iter 1
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", False),
-                    make_task_response(),
+                    make_task_response("t1"),
+                    # Iter 2
                     make_single_verify_response("req_1", True),
-                    make_single_verify_response("req_2", False),
+                    make_single_verify_response("req_2", False),  # Still unmet
+                    make_task_response("t2"),
+                    # Would be Iter 3 but max reached
                 ],
-                [make_mock_result(["x"]), make_mock_result(["y"])],
+                [make_mock_result(["t1"]), make_mock_result(["t2"])],
             ):
                 result = await orchestrator.run()
             assert result.status == LoopBStatus.FAILED
@@ -216,10 +226,22 @@ class TestRequirementsOrchestrator:
         """Test failure when task generation returns no tasks."""
         with tempfile.TemporaryDirectory() as temp_dir:
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
+            call_count = 0
+
+            async def mock_query(prompt, config, phase=None):
+                nonlocal call_count
+                call_count += 1
+                if call_count <= 2:
+                    # Pre-verification: return unmet
+                    req_id = "req_1" if call_count == 1 else "req_2"
+                    return make_single_verify_response(req_id, False)
+                # Task generation: invalid yaml
+                return "invalid yaml"
+
             with patch(
                 "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
                 new_callable=AsyncMock,
-                return_value="invalid yaml",
+                side_effect=mock_query,
             ):
                 result = await orchestrator.run()
             assert result.status == LoopBStatus.FAILED
@@ -231,7 +253,7 @@ class TestRequirementsOrchestrator:
     ) -> None:
         """Test execution without history manager."""
         config = RequirementsOrchestratorConfig(
-            max_iterations=1,
+            max_iterations=2,
             tasks_output_dir="/tmp/test_tasks",
             orchestrator_config=OrchestratorConfig(stream_output=False),
         )
@@ -243,7 +265,11 @@ class TestRequirementsOrchestrator:
         )
         with self._mock_claude_and_loopc(
             [
+                # Iter 1: pre-verify (unmet) -> task_gen
+                make_single_verify_response("req_1", False),
+                make_single_verify_response("req_2", False),
                 make_task_response(),
+                # Iter 2: pre-verify (all met) -> complete
                 make_single_verify_response("req_1", True),
                 make_single_verify_response("req_2", True),
             ],
@@ -260,20 +286,20 @@ class TestRequirementsOrchestrator:
         """Test Loop B behavior when Loop C fails or has partial failures."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Scenario 1: Loop C returns success=False (max retries reached)
-            # Use max_iter=1 to simplify
+            # Flow: pre-verify (unmet) -> task_gen -> LoopC (fail) -> max iter
             orchestrator = self._create_orchestrator(
                 sample_requirements, temp_dir, max_iter=1
             )
             with self._mock_claude_and_loopc(
                 [
-                    make_task_response(),
+                    # Pre-verification
                     make_single_verify_response("req_1", False),
                     make_single_verify_response("req_2", False),
+                    make_task_response(),
                 ],
                 [make_mock_result(["task_1"], success=False, failed_ids=["task_1"])],
             ):
                 result = await orchestrator.run()
-            # Loop B continues to verification even if Loop C failed
             # completed_task_ids should be empty since task_1 failed
             assert "task_1" not in result.completed_task_ids
             # Loop B reaches max iterations and fails
@@ -286,7 +312,12 @@ class TestRequirementsOrchestrator:
             with patch(
                 "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
                 new_callable=AsyncMock,
-                side_effect=[make_task_response()],
+                side_effect=[
+                    # Pre-verification
+                    make_single_verify_response("req_1", False),
+                    make_single_verify_response("req_2", False),
+                    make_task_response(),
+                ],
             ):
                 with patch(
                     "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
@@ -302,9 +333,10 @@ class TestRequirementsOrchestrator:
             )
             with self._mock_claude_and_loopc(
                 [
-                    make_task_response("t1"),
-                    make_single_verify_response("req_1", True),
+                    # Pre-verification
+                    make_single_verify_response("req_1", False),
                     make_single_verify_response("req_2", False),
+                    make_task_response("t1"),
                 ],
                 [make_mock_result(["t1", "t2"], success=False, failed_ids=["t2"])],
             ):
@@ -429,7 +461,10 @@ class TestLoopBResumeFromInterruption:
 
     @pytest.mark.asyncio
     async def test_resume_from_executing_tasks_state(self) -> None:
-        """Resume from EXECUTING_TASKS status should resume Loop C, not regenerate tasks."""
+        """Resume from EXECUTING_TASKS status should resume Loop C, not regenerate tasks.
+
+        Flow: Resume -> LoopC -> Iter2 pre-verify (all met) -> Complete
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = LoopBHistoryManager(temp_dir)
             requirements = RequirementDefinition(
@@ -486,17 +521,19 @@ class TestLoopBResumeFromInterruption:
             )
 
             # Mock the LLM calls and Loop C execution
-            # Key: run_orchestrator should be called (for Loop C), but NOT run_claude_query for task generation
             task_gen_call_count = 0
             loop_c_call_count = 0
+            verification_call_count = 0
 
             async def mock_claude_query(
                 prompt: str, config: OrchestratorConfig, phase: str = ""
             ) -> str:
-                nonlocal task_gen_call_count
+                nonlocal task_gen_call_count, verification_call_count
                 if phase == "task_generation":
                     task_gen_call_count += 1
-                # Return single requirement verification result (new format)
+                elif phase == "verification":
+                    verification_call_count += 1
+                # Return single requirement verification result (all met for iter2 pre-verify)
                 return '{"requirement_id": "req_1", "met": true, "summary": "Verified", "criteria_results": [], "issues": []}'
 
             async def mock_run_orchestrator(*args, **kwargs) -> OrchestratorResult:
@@ -533,12 +570,20 @@ class TestLoopBResumeFromInterruption:
                 loop_c_call_count == 1
             ), f"Loop C called {loop_c_call_count} times, expected 1"
 
+            # Verify: pre-verification should have been called (for iter 2)
+            assert (
+                verification_call_count == 1
+            ), f"Verification called {verification_call_count} times, expected 1"
+
             # Verify: completed successfully
             assert result.status == LoopBStatus.COMPLETED
 
     @pytest.mark.asyncio
     async def test_resume_from_generating_tasks_state(self) -> None:
-        """Resume from GENERATING_TASKS status should regenerate tasks."""
+        """Resume from GENERATING_TASKS status should regenerate tasks.
+
+        Flow: Resume (skip pre-verify) -> TaskGen -> LoopC -> Iter2 pre-verify (met) -> Complete
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = LoopBHistoryManager(temp_dir)
             requirements = RequirementDefinition(
@@ -585,11 +630,12 @@ class TestLoopBResumeFromInterruption:
             # Track calls
             task_gen_call_count = 0
             loop_c_call_count = 0
+            verification_call_count = 0
 
             async def mock_claude_query(
                 prompt: str, config: OrchestratorConfig, phase: str = ""
             ) -> str:
-                nonlocal task_gen_call_count
+                nonlocal task_gen_call_count, verification_call_count
                 if phase == "task_generation":
                     task_gen_call_count += 1
                     return """```yaml
@@ -601,7 +647,9 @@ tasks:
       - criterion: "OK"
         covers: [req_1.1]
 ```"""
-                # Return single requirement verification result (new format)
+                elif phase == "verification":
+                    verification_call_count += 1
+                # Return single requirement verification result (all met for iter2 pre-verify)
                 return '{"requirement_id": "req_1", "met": true, "summary": "Verified", "criteria_results": [], "issues": []}'
 
             async def mock_run_orchestrator(*args, **kwargs) -> OrchestratorResult:
@@ -637,6 +685,11 @@ tasks:
             assert (
                 loop_c_call_count == 1
             ), f"Loop C called {loop_c_call_count} times, expected 1"
+
+            # Verify: pre-verification should have been called (for iter 2)
+            assert (
+                verification_call_count == 1
+            ), f"Verification called {verification_call_count} times, expected 1"
 
             # Verify: completed successfully
             assert result.status == LoopBStatus.COMPLETED
@@ -682,6 +735,7 @@ tasks:
 
             assert resume_info["start_iteration"] == 0  # 0-indexed for iteration 1
             assert resume_info["skip_task_generation"] is True
+            assert resume_info["skip_initial_verification"] is True
             assert resume_info["resume_loop_c"] is True
 
     @pytest.mark.asyncio
@@ -725,11 +779,18 @@ tasks:
 
             assert resume_info["start_iteration"] == 0  # 0-indexed for iteration 1
             assert resume_info["skip_task_generation"] is False  # Should regenerate
+            assert (
+                resume_info["skip_initial_verification"] is True
+            )  # Pre-verify already done
             assert resume_info["resume_loop_c"] is False
 
     @pytest.mark.asyncio
     async def test_resume_info_for_verifying_requirements(self) -> None:
-        """_get_resume_info returns correct values for VERIFYING_REQUIREMENTS status."""
+        """_get_resume_info returns correct values for VERIFYING_REQUIREMENTS status.
+
+        VERIFYING_REQUIREMENTS means pre-verification was interrupted.
+        Should re-run verification from the start of the same iteration.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = LoopBHistoryManager(temp_dir)
             requirements = RequirementDefinition(
@@ -766,11 +827,13 @@ tasks:
 
             resume_info = orchestrator._get_resume_info()
 
-            # VERIFYING_REQUIREMENTS means iteration 1 is done, continue to iteration 2
-            assert (
-                resume_info["start_iteration"] == 1
-            )  # Start at iteration 2 (0-indexed = 1)
+            # VERIFYING_REQUIREMENTS means pre-verification was interrupted
+            # Re-run from same iteration with verification
+            assert resume_info["start_iteration"] == 0  # 0-indexed for iteration 1
             assert resume_info["skip_task_generation"] is False
+            assert (
+                resume_info["skip_initial_verification"] is False
+            )  # Re-run verification
             assert resume_info["resume_loop_c"] is False
 
 
@@ -900,18 +963,21 @@ class TestStepModeLoopC:
 
 
 class TestStepModeLoopB:
-    """Test --step mode for Loop B: stops after each claude code call."""
+    """Test --step mode for Loop B: stops after each claude code call.
+
+    New flow: Pre-verify -> Task gen -> Loop C -> (next iter pre-verify) -> ...
+    """
 
     @pytest.mark.asyncio
-    async def test_step_mode_stops_after_task_generation(
+    async def test_step_mode_stops_after_pre_verification(
         self, sample_requirements: RequirementDefinition
     ) -> None:
-        """Step mode should stop after task generation phase."""
+        """Step mode should stop after pre-verification phase (first claude calls)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create requirements file
             req_path = Path(temp_dir) / "requirements.yaml"
             req_path.write_text(
-                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n  - id: req_2\n    name: Test2\n    acceptance_criteria: [Done]\n"
             )
 
             tasks_dir = Path(temp_dir) / "tasks"
@@ -932,40 +998,47 @@ class TestStepModeLoopB:
                 requirements_path=str(req_path),
             )
 
-            # Mock run_claude_query for task generation
+            call_count = 0
+
+            async def mock_query(prompt, cfg, phase=""):
+                nonlocal call_count
+                call_count += 1
+                # Set _step_executed like the real function does
+                cfg._step_executed = True
+                return make_single_verify_response("req_1", False)
+
+            # Mock run_claude_query for pre-verification
             with patch(
                 "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
                 new_callable=AsyncMock,
-                return_value=make_task_response(),
-            ) as mock_query:
+                side_effect=mock_query,
+            ):
                 result = await orchestrator.run()
 
-            # Should stop after task generation (first claude call)
-            # Status should NOT be COMPLETED or FAILED
+            # Should stop after first pre-verification call (step mode)
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
-            # Task generation should have been called once
-            assert mock_query.call_count == 1
+            # Pre-verification should have been called once before StepModeStop
+            assert call_count == 1
 
     @pytest.mark.asyncio
-    async def test_step_mode_stops_after_loop_c_step(
+    async def test_step_mode_stops_after_task_generation(
         self, sample_requirements: RequirementDefinition
     ) -> None:
-        """Step mode should stop when Loop C stops due to step mode."""
+        """Step mode should stop after task generation phase."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create requirements file
             req_path = Path(temp_dir) / "requirements.yaml"
             req_path.write_text(
-                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n  - id: req_2\n    name: Test2\n    acceptance_criteria: [Done]\n"
             )
 
             tasks_dir = Path(temp_dir) / "tasks"
-            # Step mode disabled for task generation, we want to test Loop C stopping
             config = RequirementsOrchestratorConfig(
                 max_iterations=3,
                 tasks_output_dir=str(tasks_dir),
                 orchestrator_config=OrchestratorConfig(
                     stream_output=False,
-                    step_mode=False,  # Disabled initially
+                    step_mode=False,  # Enable only for task generation
                 ),
             )
 
@@ -977,13 +1050,73 @@ class TestStepModeLoopB:
                 requirements_path=str(req_path),
             )
 
-            # Mock claude query for task generation (no step mode)
-            # Then mock run_orchestrator to return step_stopped
-            call_count = {"task_gen": 0, "loop_c": 0}
+            call_count = {"verification": 0, "task_gen": 0}
 
             async def mock_claude_query(prompt, cfg, phase=""):
-                call_count["task_gen"] += 1
-                return make_task_response()
+                if phase == "verification":
+                    call_count["verification"] += 1
+                    req_id = "req_1" if call_count["verification"] == 1 else "req_2"
+                    return make_single_verify_response(req_id, False)
+                else:
+                    call_count["task_gen"] += 1
+                    # Enable step mode for task generation
+                    cfg.step_mode = True
+                    cfg._step_executed = True
+                    return make_task_response()
+
+            with patch(
+                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                new_callable=AsyncMock,
+                side_effect=mock_claude_query,
+            ):
+                result = await orchestrator.run()
+
+            # Should stop after task generation (StepModeStop raised)
+            assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
+            # Pre-verification called for both reqs, task gen called once
+            assert call_count["verification"] == 2
+            assert call_count["task_gen"] == 1
+
+    @pytest.mark.asyncio
+    async def test_step_mode_stops_after_loop_c_step(
+        self, sample_requirements: RequirementDefinition
+    ) -> None:
+        """Step mode should stop when Loop C stops due to step mode."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Create requirements file
+            req_path = Path(temp_dir) / "requirements.yaml"
+            req_path.write_text(
+                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n  - id: req_2\n    name: Test2\n    acceptance_criteria: [Done]\n"
+            )
+
+            tasks_dir = Path(temp_dir) / "tasks"
+            config = RequirementsOrchestratorConfig(
+                max_iterations=3,
+                tasks_output_dir=str(tasks_dir),
+                orchestrator_config=OrchestratorConfig(
+                    stream_output=False,
+                    step_mode=False,
+                ),
+            )
+
+            manager = LoopBHistoryManager(temp_dir)
+            orchestrator = RequirementsOrchestrator(
+                requirements=sample_requirements,
+                config=config,
+                history_manager=manager,
+                requirements_path=str(req_path),
+            )
+
+            call_count = {"verification": 0, "task_gen": 0, "loop_c": 0}
+
+            async def mock_claude_query(prompt, cfg, phase=""):
+                if phase == "verification":
+                    call_count["verification"] += 1
+                    req_id = "req_1" if call_count["verification"] == 1 else "req_2"
+                    return make_single_verify_response(req_id, False)
+                else:
+                    call_count["task_gen"] += 1
+                    return make_task_response()
 
             async def mock_run_orchestrator(*args, **kwargs):
                 call_count["loop_c"] += 1
@@ -1012,80 +1145,7 @@ class TestStepModeLoopB:
 
             # Should stop after Loop C returns step_stopped
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
-            # Task generation and Loop C should have been called
+            # Pre-verification for both reqs, task gen, and Loop C should have been called
+            assert call_count["verification"] == 2
             assert call_count["task_gen"] == 1
             assert call_count["loop_c"] == 1
-
-    @pytest.mark.asyncio
-    async def test_step_mode_stops_after_verification(
-        self, sample_requirements: RequirementDefinition
-    ) -> None:
-        """Step mode should stop after verification phase."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            # Create requirements file
-            req_path = Path(temp_dir) / "requirements.yaml"
-            req_path.write_text(
-                "requirements:\n  - id: req_1\n    name: Test\n    acceptance_criteria: [Done]\n"
-            )
-
-            tasks_dir = Path(temp_dir) / "tasks"
-            config = RequirementsOrchestratorConfig(
-                max_iterations=3,
-                tasks_output_dir=str(tasks_dir),
-                orchestrator_config=OrchestratorConfig(
-                    stream_output=False,
-                    step_mode=False,  # We'll enable it for verification
-                ),
-            )
-
-            manager = LoopBHistoryManager(temp_dir)
-            orchestrator = RequirementsOrchestrator(
-                requirements=sample_requirements,
-                config=config,
-                history_manager=manager,
-                requirements_path=str(req_path),
-            )
-
-            call_count = {"task_gen": 0, "verification": 0, "loop_c": 0}
-
-            async def mock_claude_query(prompt, cfg, phase=""):
-                if phase == "task_generation":
-                    call_count["task_gen"] += 1
-                    return make_task_response()
-                else:
-                    call_count["verification"] += 1
-                    # Enable step mode for verification
-                    cfg.step_mode = True
-                    cfg._step_executed = True
-                    return make_verify_response(False, ["req_2"])
-
-            async def mock_run_orchestrator(*args, **kwargs):
-                call_count["loop_c"] += 1
-                return OrchestratorResult(
-                    success=True,
-                    task_results=[
-                        TaskResult(task_id="task_1", status=TaskStatus.APPROVED)
-                    ],
-                    total_attempts=1,
-                    summary="Done",
-                    step_stopped=False,
-                )
-
-            with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
-                new_callable=AsyncMock,
-                side_effect=mock_claude_query,
-            ):
-                with patch(
-                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
-                    new_callable=AsyncMock,
-                    side_effect=mock_run_orchestrator,
-                ):
-                    result = await orchestrator.run()
-
-            # Should stop after verification (StepModeStop raised)
-            assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
-            # Task gen, Loop C, and verification should have been called
-            assert call_count["task_gen"] == 1
-            assert call_count["loop_c"] == 1
-            assert call_count["verification"] == 1

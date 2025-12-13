@@ -27,7 +27,6 @@ from .orchestrator import (
     save_history_to_file,
 )
 from .prompts import (
-    build_requirement_verification_prompt,
     build_single_requirement_verification_prompt,
     build_task_generation_prompt,
     check_coverage,
@@ -40,6 +39,7 @@ from .schema import (
     LoopBIteration,
     LoopBStatus,
     OrchestratorResult,
+    Requirement,
     RequirementDefinition,
     Task,
     TaskDefinition,
@@ -261,16 +261,51 @@ class RequirementsOrchestrator:
         start_iteration = resume_info["start_iteration"]
         skip_task_generation = resume_info["skip_task_generation"]
         resume_loop_c = resume_info["resume_loop_c"]
+        skip_initial_verification = resume_info.get("skip_initial_verification", False)
+        resume_verification_index = resume_info.get("resume_verification_index", 0)
+        partial_verification_results = resume_info.get("partial_verification_results")
 
         try:
             for iteration in range(start_iteration, self.config.max_iterations):
                 self._print_loop_header(iteration)
-                # Only skip task generation on the first iteration of resume
+                # Only skip on the first iteration of resume
                 do_skip_task_gen = skip_task_generation and iteration == start_iteration
+                do_skip_initial_verify = (
+                    skip_initial_verification and iteration == start_iteration
+                )
+                # Resume verification only on first iteration
+                do_resume_verification = (
+                    resume_verification_index > 0 and iteration == start_iteration
+                )
 
-                # Step 1 & 2: Get or generate tasks
+                # Step 1: Pre-verification - check which requirements need work
+                if not do_skip_initial_verify:
+                    if do_resume_verification:
+                        unmet_requirements = await self._pre_verify_requirements(
+                            iteration,
+                            resume_index=resume_verification_index,
+                            partial_results=partial_verification_results,
+                        )
+                    else:
+                        unmet_requirements = await self._pre_verify_requirements(
+                            iteration
+                        )
+                    if not unmet_requirements:
+                        # All requirements already met
+                        logger.info("Loop B: All requirements already met")
+                        self._complete({"all_requirements_met": True})
+                        break
+                else:
+                    # Use previous iteration's unmet requirements
+                    unmet_requirements = self._get_previous_unmet_requirements()
+
+                # Reset verification resume state after first iteration
+                resume_verification_index = 0
+                partial_verification_results = None
+
+                # Step 2: Get or generate tasks (for unmet requirements only)
                 tasks, tasks_yaml_path = await self._get_or_generate_tasks(
-                    iteration, do_skip_task_gen
+                    iteration, do_skip_task_gen, unmet_requirements
                 )
                 if tasks is None:
                     break  # _fail already called
@@ -298,11 +333,18 @@ class RequirementsOrchestrator:
                     self.history.current_iteration = iteration + 1
                     self._save_history()
 
-                # Step 4: Verify requirements and record iteration
-                should_break = await self._verify_and_record_iteration(
-                    iteration, tasks_yaml_path, loop_c_history_id
+                # Step 4: Record iteration (verification done at start of next iteration)
+                self._record_iteration(
+                    iteration,
+                    tasks_yaml_path,
+                    loop_c_history_id,
+                    verification_result=None,
+                    unmet_requirements=[r.id for r in unmet_requirements],
                 )
-                if should_break:
+
+                # Check max iterations
+                if iteration + 1 >= self.config.max_iterations:
+                    self._fail(f"Max iterations ({self.config.max_iterations}) reached")
                     break
 
         except StepModeStop as e:
@@ -313,9 +355,17 @@ class RequirementsOrchestrator:
         return self.history
 
     async def _get_or_generate_tasks(
-        self, iteration: int, skip_generation: bool
+        self,
+        iteration: int,
+        skip_generation: bool,
+        unmet_requirements: list[Requirement],
     ) -> tuple[list[Task] | None, str]:
         """Get existing tasks or generate new ones for the iteration.
+
+        Args:
+            iteration: Current iteration number (0-indexed)
+            skip_generation: Whether to skip generation and load existing tasks
+            unmet_requirements: Requirements that are not yet met
 
         Returns:
             Tuple of (tasks, tasks_yaml_path). tasks is None if generation failed.
@@ -323,26 +373,39 @@ class RequirementsOrchestrator:
         assert self.history is not None
 
         if not skip_generation:
-            return await self._generate_new_tasks(iteration)
+            return await self._generate_new_tasks(iteration, unmet_requirements)
 
         # Resume: try to find existing tasks
-        return await self._load_or_regenerate_tasks(iteration)
+        return await self._load_or_regenerate_tasks(iteration, unmet_requirements)
 
     async def _generate_new_tasks(
-        self, iteration: int
+        self, iteration: int, unmet_requirements: list[Requirement]
     ) -> tuple[list[Task] | None, str]:
-        """Generate new tasks for the iteration."""
+        """Generate new tasks for the iteration.
+
+        Args:
+            iteration: Current iteration number (0-indexed)
+            unmet_requirements: Requirements that are not yet met
+        """
         assert self.history is not None
 
         self.history.current_iteration = iteration + 1
         self._save_history()
 
-        logger.info(f"Loop B iteration {iteration + 1}: Generating tasks")
-        self._print_step("TASK GENERATION", "Generating tasks from requirements")
+        logger.info(
+            f"Loop B iteration {iteration + 1}: Generating tasks for "
+            f"{len(unmet_requirements)} unmet requirements"
+        )
+        self._print_step(
+            "TASK GENERATION",
+            f"Generating tasks for {len(unmet_requirements)} unmet requirements",
+        )
         self.history.status = LoopBStatus.GENERATING_TASKS
         self._save_history()
 
-        tasks = await self._generate_tasks_with_coverage_warning(iteration)
+        tasks = await self._generate_tasks_with_coverage_warning(
+            iteration, unmet_requirements
+        )
         if not tasks:
             self._fail("Failed to generate tasks")
             return None, ""
@@ -351,9 +414,14 @@ class RequirementsOrchestrator:
         return tasks, tasks_yaml_path
 
     async def _load_or_regenerate_tasks(
-        self, iteration: int
+        self, iteration: int, unmet_requirements: list[Requirement]
     ) -> tuple[list[Task] | None, str]:
-        """Load existing tasks or regenerate if not found."""
+        """Load existing tasks or regenerate if not found.
+
+        Args:
+            iteration: Current iteration number (0-indexed)
+            unmet_requirements: Requirements that are not yet met
+        """
         assert self.history is not None
 
         # First check if there's an iteration record for this iteration
@@ -384,7 +452,7 @@ class RequirementsOrchestrator:
 
         # Fallback: regenerate tasks if file missing
         logger.warning("Cannot resume: tasks file missing, regenerating")
-        return await self._generate_new_tasks(iteration)
+        return await self._generate_new_tasks(iteration, unmet_requirements)
 
     async def _run_loop_c_step(
         self, iteration: int, tasks_yaml_path: str, resume: bool, num_tasks: int = 0
@@ -399,54 +467,94 @@ class RequirementsOrchestrator:
 
         return await self._execute_loop_c(tasks_yaml_path, resume=resume)
 
-    async def _verify_and_record_iteration(
-        self, iteration: int, tasks_yaml_path: str, loop_c_history_id: str | None
-    ) -> bool:
-        """Verify requirements and record iteration. Returns True if loop should break."""
+    async def _pre_verify_requirements(
+        self,
+        iteration: int,
+        resume_index: int = 0,
+        partial_results: list[dict[str, Any]] | None = None,
+    ) -> list[Requirement]:
+        """Verify all requirements and return unmet ones.
+
+        This is called at the start of each iteration to determine which
+        requirements need tasks generated.
+
+        Args:
+            iteration: Current iteration number (0-indexed)
+            resume_index: Index of requirement to resume from (for step mode resume)
+            partial_results: Previously completed verification results (for resume)
+
+        Returns:
+            List of Requirement objects that are not yet met
+
+        Raises:
+            StepModeStop: If step mode is enabled and a step was executed.
+        """
         assert self.history is not None
 
-        logger.info(f"Loop B iteration {iteration + 1}: Verifying requirements")
-        self._print_step("VERIFICATION", "Checking if requirements are met")
+        if resume_index > 0:
+            logger.info(
+                f"Loop B iteration {iteration + 1}: Resuming verification from requirement {resume_index + 1}"
+            )
+            self._print_step(
+                "PRE-VERIFICATION",
+                f"Resuming from requirement {resume_index + 1}/{len(self.requirements.requirements)}",
+            )
+        else:
+            logger.info(f"Loop B iteration {iteration + 1}: Pre-verifying requirements")
+            self._print_step(
+                "PRE-VERIFICATION", "Checking which requirements need work"
+            )
+
         self.history.status = LoopBStatus.VERIFYING_REQUIREMENTS
         self._save_history()
 
-        verification = await self._verify_requirements()
-        unmet_requirements = get_unmet_requirement_ids(verification)
+        verification = await self._verify_requirements(resume_index, partial_results)
 
-        # Record or update iteration
-        self._record_iteration(
-            iteration,
-            tasks_yaml_path,
-            loop_c_history_id,
-            verification,
-            unmet_requirements,
-        )
+        # Store verification result for reference
+        if self.history.iterations:
+            # Update the last iteration's verification result
+            self.history.iterations[-1].verification_result = verification
+            self._save_history()
 
-        # Check completion
-        if verification.get("all_requirements_met", False):
-            logger.info("Loop B: All requirements met")
-            self._complete(verification)
-            return True
+        # Get unmet requirement IDs and map to Requirement objects
+        unmet_ids = get_unmet_requirement_ids(verification)
+        unmet_requirements = [
+            req for req in self.requirements.requirements if req.id in unmet_ids
+        ]
 
-        if iteration + 1 >= self.config.max_iterations:
-            self._fail(f"Max iterations ({self.config.max_iterations}) reached")
-            return True
+        callback = self._get_callback()
+        config = self.config.orchestrator_config
+        if config.stream_output:
+            met_count = len(self.requirements.requirements) - len(unmet_requirements)
+            callback(
+                f"\n{DIM}Pre-verification: {met_count} met, "
+                f"{len(unmet_requirements)} need work{RESET}\n"
+            )
 
-        # Prepare for next iteration
-        logger.info(
-            f"Loop B: {len(unmet_requirements)} requirements not met, "
-            "generating additional tasks"
-        )
-        self.history.status = LoopBStatus.GENERATING_ADDITIONAL_TASKS
-        self._save_history()
-        return False
+        return unmet_requirements
+
+    def _get_previous_unmet_requirements(self) -> list[Requirement]:
+        """Get unmet requirements from the previous iteration.
+
+        Used when resuming and skipping initial verification.
+        """
+        assert self.history is not None
+
+        if not self.history.iterations:
+            # No previous iteration, return all requirements
+            return list(self.requirements.requirements)
+
+        last_iter = self.history.iterations[-1]
+        unmet_ids = set(last_iter.unmet_requirements)
+
+        return [req for req in self.requirements.requirements if req.id in unmet_ids]
 
     def _record_iteration(
         self,
         iteration: int,
         tasks_yaml_path: str,
         loop_c_history_id: str | None,
-        verification: dict[str, Any],
+        verification_result: dict[str, Any] | None,
         unmet_requirements: list[str],
     ) -> None:
         """Record or update iteration in history."""
@@ -464,7 +572,7 @@ class RequirementsOrchestrator:
             iteration_number=iteration + 1,
             tasks_yaml_path=tasks_yaml_path,
             loop_c_history_id=loop_c_history_id,
-            verification_result=verification,
+            verification_result=verification_result,
             unmet_requirements=unmet_requirements,
         )
         if existing_iter_idx is not None:
@@ -490,6 +598,7 @@ class RequirementsOrchestrator:
             return {
                 "start_iteration": 0,
                 "skip_task_generation": False,
+                "skip_initial_verification": False,
                 "resume_loop_c": False,
             }
 
@@ -498,33 +607,36 @@ class RequirementsOrchestrator:
             return {
                 "start_iteration": current_iter - 1,  # 0-indexed
                 "skip_task_generation": True,  # Tasks already generated
+                "skip_initial_verification": True,  # Verification already done
                 "resume_loop_c": True,  # Resume Loop C from where it stopped
             }
 
         # If we were generating tasks, restart task generation for that iteration
+        # (verification was done, but task generation failed/interrupted)
         if status == LoopBStatus.GENERATING_TASKS:
             return {
                 "start_iteration": current_iter - 1,
                 "skip_task_generation": False,
+                "skip_initial_verification": True,  # Verification already done
                 "resume_loop_c": False,
             }
 
-        # If verifying or generating additional tasks, continue to next iteration
-        # (previous iteration completed)
-        if status in {
-            LoopBStatus.VERIFYING_REQUIREMENTS,
-            LoopBStatus.GENERATING_ADDITIONAL_TASKS,
-        }:
+        # If verifying, resume verification from where it stopped
+        if status == LoopBStatus.VERIFYING_REQUIREMENTS:
             return {
-                "start_iteration": current_iter,  # Continue with next iteration
+                "start_iteration": current_iter - 1,
                 "skip_task_generation": False,
+                "skip_initial_verification": False,
                 "resume_loop_c": False,
+                "resume_verification_index": self.history.current_verification_index,
+                "partial_verification_results": self.history.partial_verification_results,
             }
 
         # Completed or failed - shouldn't normally reach here
         return {
             "start_iteration": current_iter,
             "skip_task_generation": False,
+            "skip_initial_verification": False,
             "resume_loop_c": False,
         }
 
@@ -626,17 +738,24 @@ class RequirementsOrchestrator:
             self.history.final_result = final_result
             self._save_history()
 
-    async def _generate_tasks_with_coverage_warning(self, iteration: int) -> list[Task]:
+    async def _generate_tasks_with_coverage_warning(
+        self, iteration: int, unmet_requirements: list[Requirement]
+    ) -> list[Task]:
         """Generate tasks and warn if coverage is incomplete.
 
         Coverage check is informational only - requirement verification loop
         will catch any missing requirements in subsequent iterations.
         """
-        tasks = await self._generate_tasks(iteration)
+        tasks = await self._generate_tasks(iteration, unmet_requirements)
         if not tasks:
             return []
 
-        all_covered, uncovered = check_coverage(self.requirements, tasks)
+        # Create a temporary RequirementDefinition for coverage check
+        unmet_req_def = RequirementDefinition(
+            requirements=unmet_requirements,
+            common_validation=self.requirements.common_validation,
+        )
+        all_covered, uncovered = check_coverage(unmet_req_def, tasks)
         if not all_covered:
             logger.warning(
                 f"Coverage incomplete: {len(uncovered)} criteria not explicitly covered "
@@ -646,32 +765,36 @@ class RequirementsOrchestrator:
 
         return tasks
 
-    async def _generate_tasks(self, iteration: int) -> list[Task]:
+    async def _generate_tasks(
+        self, iteration: int, unmet_requirements: list[Requirement]
+    ) -> list[Task]:
         """Generate tasks using LLM.
+
+        Args:
+            iteration: Current iteration number (0-indexed)
+            unmet_requirements: Requirements that need tasks generated
 
         Raises:
             StepModeStop: If step mode is enabled and a step was executed.
         """
         assert self.history is not None
-        if iteration == 0:
-            prompt = build_task_generation_prompt(self.requirements)
-        else:
-            previous_verification = (
-                self.history.iterations[-1].verification_result
-                if self.history.iterations
-                else None
-            )
-            feedback = (
-                previous_verification.get("feedback_for_additional_tasks", "")
-                if previous_verification
-                else None
-            )
 
-            prompt = build_task_generation_prompt(
-                self.requirements,
-                completed_tasks=self.all_completed_tasks,
-                previous_feedback=feedback,
-            )
+        # Get previous feedback if available
+        previous_feedback = None
+        if self.history.iterations:
+            previous_verification = self.history.iterations[-1].verification_result
+            if previous_verification:
+                previous_feedback = previous_verification.get(
+                    "feedback_for_additional_tasks", ""
+                )
+
+        prompt = build_task_generation_prompt(
+            unmet_requirements=unmet_requirements,
+            all_requirements=list(self.requirements.requirements),
+            common_validation=self.requirements.common_validation,
+            completed_tasks=self.all_completed_tasks if iteration > 0 else None,
+            previous_feedback=previous_feedback,
+        )
 
         config = self.config.orchestrator_config
         callback = self._get_callback()
@@ -704,7 +827,7 @@ class RequirementsOrchestrator:
         filename = f"{req_name}-tasks-iter{iteration + 1}.yaml"
         filepath = output_dir / filename
 
-        tasks_data = {
+        tasks_data: dict[str, Any] = {
             "tasks": [
                 {
                     "id": t.id,
@@ -716,6 +839,9 @@ class RequirementsOrchestrator:
                 for t in tasks
             ]
         }
+        # Include common_validation from requirements
+        if self.requirements.common_validation:
+            tasks_data["common_validation"] = self.requirements.common_validation
 
         with open(filepath, "w", encoding="utf-8") as f:
             yaml.dump(
@@ -819,23 +945,36 @@ class RequirementsOrchestrator:
                     self.history.completed_task_ids.append(task_id)
             self.all_task_results.append(task_result)
 
-    async def _verify_single_requirement(self, req: "Requirement") -> dict[str, Any]:
+    async def _verify_single_requirement(
+        self, req: "Requirement", req_index: int, total_reqs: int
+    ) -> dict[str, Any]:
         """Verify a single requirement by actually executing verification steps.
 
         Args:
             req: The requirement to verify
+            req_index: 1-indexed position of this requirement
+            total_reqs: Total number of requirements
 
         Returns:
             Verification result for this requirement
         """
-        from .schema import Requirement  # Avoid circular import at module level
 
-        prompt = build_single_requirement_verification_prompt(req)
+        prompt = build_single_requirement_verification_prompt(
+            req, list(self.requirements.requirements)
+        )
         config = self.config.orchestrator_config
         callback = self._get_callback()
 
         if config.stream_output:
-            callback(f"\n{DIM}--- Verifying {req.id}: {req.name} ---{RESET}\n")
+            callback(f"\n{BOLD}{'=' * 60}{RESET}\n")
+            callback(
+                f"{BOLD}🔍 VERIFICATION [{req_index}/{total_reqs}]: {req.id}{RESET}\n"
+            )
+            callback(f"{DIM}   {req.name}{RESET}\n")
+            callback(f"{BOLD}{'=' * 60}{RESET}\n")
+            callback(f"{DIM}>>> PROMPT >>>{RESET}\n")
+            callback(f"{DIM}{prompt}{RESET}\n")
+            callback(f"{DIM}<<< END PROMPT <<<{RESET}\n\n")
 
         output = await run_claude_query(prompt, config, phase="verification")
         result = parse_verification_result(output)
@@ -846,48 +985,79 @@ class RequirementsOrchestrator:
 
         return result
 
-    async def _verify_requirements(self) -> dict[str, Any]:
+    async def _verify_requirements(
+        self, resume_index: int = 0, partial_results: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
         """Verify if requirements are met by checking each requirement individually.
+
+        Args:
+            resume_index: Index of requirement to resume from (for step mode resume)
+            partial_results: Previously completed verification results (for resume)
 
         Raises:
             StepModeStop: If step mode is enabled and a step was executed.
         """
+        assert self.history is not None
+
         config = self.config.orchestrator_config
         callback = self._get_callback()
+        total_reqs = len(self.requirements.requirements)
 
         if config.stream_output:
             callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
-            callback(
-                f"{CYAN}Starting requirement verification ({len(self.requirements.requirements)} requirements){RESET}\n"
-            )
+            callback(f"{BOLD}{CYAN}🔎 REQUIREMENT VERIFICATION{RESET}\n")
+            if resume_index > 0:
+                callback(
+                    f"{DIM}   Resuming from requirement {resume_index + 1}/{total_reqs}{RESET}\n"
+                )
+            else:
+                callback(f"{DIM}   Total requirements: {total_reqs}{RESET}\n")
+            callback(f"{BOLD}{'-' * 60}{RESET}\n")
 
-        # Verify each requirement individually
-        requirement_statuses = []
-        all_met = True
+        # Initialize or restore partial results
+        requirement_statuses: list[dict[str, Any]] = list(partial_results or [])
+        all_met = all(s.get("met", False) for s in requirement_statuses)
 
-        for req in self.requirements.requirements:
-            result = await self._verify_single_requirement(req)
+        # Verify each requirement individually (starting from resume_index)
+        for idx, req in enumerate(self.requirements.requirements):
+            if idx < resume_index:
+                continue  # Skip already verified requirements
+
+            # Update history with current verification progress
+            self.history.current_verification_index = idx
+            self.history.partial_verification_results = requirement_statuses
+            self._save_history()
+
+            result = await self._verify_single_requirement(req, idx + 1, total_reqs)
             met = result.get("met", False)
             if not met:
                 all_met = False
 
-            requirement_statuses.append(
-                {
-                    "requirement_id": req.id,
-                    "met": met,
-                    "evidence": result.get("summary", ""),
-                    "criteria_results": result.get("criteria_results", []),
-                    "issues": result.get("issues", []),
-                }
-            )
+            status_record = {
+                "requirement_id": req.id,
+                "met": met,
+                "evidence": result.get("summary", ""),
+                "criteria_results": result.get("criteria_results", []),
+                "issues": result.get("issues", []),
+            }
+            requirement_statuses.append(status_record)
 
             if config.stream_output:
                 status_icon = f"{GREEN}✓{RESET}" if met else f"{YELLOW}✗{RESET}"
-                callback(f"  {status_icon} {req.id}: {'met' if met else 'not met'}\n")
+                callback(f"\n  {status_icon} {req.id}: {'met' if met else 'not met'}\n")
 
             # Step mode check after each verification
             if config.step_mode and config._step_executed:
+                # Save progress before stopping
+                self.history.current_verification_index = idx + 1
+                self.history.partial_verification_results = requirement_statuses
+                self._save_history()
                 raise StepModeStop("verification")
+
+        # Reset verification progress after completion
+        self.history.current_verification_index = 0
+        self.history.partial_verification_results = None
+        self._save_history()
 
         # Aggregate results
         unmet_count = sum(1 for s in requirement_statuses if not s["met"])
@@ -904,6 +1074,11 @@ class RequirementsOrchestrator:
                 feedback_parts.append(
                     f"{status['requirement_id']}: {', '.join(status['issues'])}"
                 )
+
+        if config.stream_output:
+            callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
+            callback(f"{CYAN}Verification Summary: {summary}{RESET}\n")
+            callback(f"{BOLD}{'-' * 60}{RESET}\n")
 
         return {
             "all_requirements_met": all_met,

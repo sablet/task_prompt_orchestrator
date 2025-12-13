@@ -240,7 +240,11 @@ def build_instruction_prompt(task: Task, cwd: str | None = None) -> str:
     )
 
 
-def build_validation_prompt(task: Task, instruction_output: str) -> str:
+def build_validation_prompt(
+    task: Task,
+    instruction_output: str,
+    common_validation: list[str] | None = None,
+) -> str:
     """Build prompt for task validation."""
     return render_template(
         "task_validation.j2",
@@ -248,6 +252,7 @@ def build_validation_prompt(task: Task, instruction_output: str) -> str:
         instruction=task.instruction,
         instruction_output=instruction_output,
         validation_criteria=task.validation,
+        common_validation=common_validation or [],
     )
 
 
@@ -445,12 +450,15 @@ async def execute_validation_phase(
     task_number: int,
     total_tasks: int,
     instruction_output: str,
+    common_validation: list[str] | None = None,
 ) -> tuple[str, bool, str]:
     """Execute the validation phase of a task. Returns (output, approved, feedback)."""
     callback = config.stream_callback or default_stream_callback
     stream = config.stream_output
 
-    validation_prompt = build_validation_prompt(task, instruction_output)
+    validation_prompt = build_validation_prompt(
+        task, instruction_output, common_validation
+    )
     if stream:
         callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
         callback(f"{YELLOW}🔍 VALIDATION [{task_number}/{total_tasks}]{RESET}\n")
@@ -483,6 +491,7 @@ async def execute_task(
     previous_feedback: str | None = None,
     skip_instruction: bool = False,
     existing_instruction_output: str | None = None,
+    common_validation: list[str] | None = None,
 ) -> TaskResult | StepResult:
     """Execute a single task with instruction and validation.
 
@@ -520,7 +529,12 @@ async def execute_task(
                 return StepResult(task_result=result, stopped_after="instruction")
 
         validation_output, approved, feedback = await execute_validation_phase(
-            task, config, task_number, total_tasks, result.instruction_output
+            task,
+            config,
+            task_number,
+            total_tasks,
+            result.instruction_output,
+            common_validation,
         )
         result.validation_output = validation_output
         result.validation_approved = approved
@@ -708,6 +722,7 @@ async def _execute_task_with_retries(
     history: ExecutionHistory | None,
     history_manager: HistoryManager | None,
     resume_point: ResumePoint | None,
+    common_validation: list[str] | None = None,
 ) -> tuple[TaskResult | StepResult | None, str | None]:
     """Execute a single task with retry logic.
 
@@ -761,6 +776,7 @@ async def _execute_task_with_retries(
             previous_feedback=feedback,
             skip_instruction=should_skip,
             existing_instruction_output=instruction_output if should_skip else None,
+            common_validation=common_validation,
         )
 
         # Handle StepResult (step mode stopped execution)
@@ -867,6 +883,7 @@ async def run_orchestrator(
             history,
             history_manager,
             resume_point,
+            common_validation=task_definition.common_validation,
         )
 
         if error_summary:

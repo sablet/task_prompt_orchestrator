@@ -43,6 +43,8 @@ exempt-modules = []
 "**/tests/**/*.py" = ["ALL"]
 "main.py" = ["PLR6301"]  # Fire CLI requires instance methods
 "model/**/*.py" = ["ALL"]  # External model code
+"src/task_prompt_orchestrator/cli.py" = ["S404", "S603"]  # subprocess is necessary for plan command
+"src/task_prompt_orchestrator/orchestrator.py" = ["C901", "PLR0912", "PLR0915"]  # Complex async orchestration logic
 
 [tool.ruff.lint.mccabe]
 max-complexity = 12

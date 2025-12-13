@@ -1,9 +1,17 @@
 # Sample requirements definition for Loop B orchestrator
 #
 # - acceptance_criteria: ユーザー視点の要件（何が欲しいか）
+#   - criterion: 検証可能な基準
+#   - verify: 検証方法（[metrics_check], [cli_test], [flow_order], [intermediate], [regression]）
 # - design_decisions: 技術視点の判断（どう実現するか）※オプション
+# - common_validation: 全タスク共通の品質基準
 #
 # Claude Code が自動的にファイルを読み込んで検証する
+
+# 全タスク共通の品質基準（タスク固有の validation に加えて適用）
+common_validation:
+  - "make check が通過する"
+  - "make test が通過する"
 
 requirements:
   - id: req_aggregation
@@ -12,36 +20,45 @@ requirements:
       CSVの列は date, category, amount を想定。
       空行・不正データは無視する。
     acceptance_criteria:
-      - "カテゴリ別の売上合計を取得できる"
-      - "月別の売上合計を取得できる"
+      - criterion: "カテゴリ別の売上合計を取得できる"
+        verify: "[metrics_check] カテゴリ名をキー、売上合計を値とする集計結果が得られる"
+      - criterion: "月別の売上合計を取得できる"
+        verify: "[metrics_check] 月をキー、売上合計を値とする集計結果が得られる"
     design_decisions:
-      - "aggregate_by_category(data) -> dict[str, float] で実装する"
-      - "aggregate_by_month(data) -> dict[str, float] で実装する"
+      - "集計処理は関数として分離する"
 
   - id: req_report_output
     name: Markdownレポートの生成
     acceptance_criteria:
-      - "レポートにカテゴリ別売上テーブルが含まれる"
-      - "レポートに月別売上テーブルが含まれる"
-      - "合計金額が表示される"
+      - criterion: "レポートにカテゴリ別売上テーブルが含まれる"
+        verify: "[intermediate] 出力にMarkdownテーブル形式でカテゴリ別売上が含まれる"
+      - criterion: "レポートに月別売上テーブルが含まれる"
+        verify: "[intermediate] 出力にMarkdownテーブル形式で月別売上が含まれる"
+      - criterion: "合計金額が表示される"
+        verify: "[metrics_check] 出力に売上合計値が含まれる"
     design_decisions:
-      - "generate_report() がmarkdown形式の文字列を返す"
+      - "レポート生成はmarkdown形式の文字列を返す関数として実装する"
 
   - id: req_cli
     name: CLIからの実行
     acceptance_criteria:
-      - "出力先を指定できる"
-      - "指定がない場合は標準出力に表示"
-      - "既存の load_sales_data() を変更しない"
+      - criterion: "出力先を指定できる"
+        verify: "[cli_test] 出力先オプションを指定して実行成功。ファイルが生成される"
+      - criterion: "指定がない場合は標準出力に表示"
+        verify: "[cli_test] オプションなしで実行成功。標準出力にレポートが表示される"
+      - criterion: "既存の load_sales_data() を変更しない"
+        verify: "[intermediate] load_sales_data関数のシグネチャと既存動作が維持されている"
     design_decisions:
       - "click ライブラリを使用する"
-      - "--output オプションで出力先を指定"
+      - "出力先指定用のオプションを提供する"
 
   - id: req_env
     name: 実行場所やデータの整備
     acceptance_criteria:
-      - "output/sales_report_test 配下で動作する"
-      - "サンプルデータで動作検証ができている"
+      - criterion: "output/sales_report_test 配下で動作する"
+        verify: "[cli_test] output/sales_report_test ディレクトリで実行成功"
+      - criterion: "サンプルデータで動作検証ができている"
+        verify: "[intermediate] サンプルCSVファイルが存在し、レポート生成が完了する"
     design_decisions:
-      - "uv run python -m sales report input.csv で実行できる"
-      - "input.csv は10行ほどのサンプルデータを作成する"
+      - "モジュール実行形式で実行できる"
+      - "サンプルデータは10行程度のCSVファイルを用意する"

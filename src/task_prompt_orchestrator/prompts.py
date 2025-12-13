@@ -110,18 +110,39 @@ def _format_task_results(results: list[TaskResult]) -> str:
     return "\n".join(lines)
 
 
+def _format_common_validation(common_validation: list[str]) -> str:
+    """Format common validation criteria for prompt."""
+    if not common_validation:
+        return ""
+    return "\n".join(f"- {criterion}" for criterion in common_validation)
+
+
 def build_task_generation_prompt(
-    requirements: RequirementDefinition,
+    unmet_requirements: list[Requirement],
+    all_requirements: list[Requirement],
+    common_validation: list[str],
     completed_tasks: list[Task] | None = None,
     previous_feedback: str | None = None,
 ) -> str:
-    """Build prompt for generating tasks from requirements."""
-    req_text = _format_requirements_with_ids(requirements.requirements)
+    """Build prompt for generating tasks from unmet requirements.
+
+    Args:
+        unmet_requirements: Requirements that are not yet met (task generation target)
+        all_requirements: All requirements (for context reference)
+        common_validation: Common validation criteria for all tasks
+        completed_tasks: Previously completed tasks (for additional task generation)
+        previous_feedback: Feedback from previous verification
+    """
+    req_text = _format_requirements_with_ids(unmet_requirements)
+    all_req_text = _format_requirements(all_requirements)
+    common_val_text = _format_common_validation(common_validation)
 
     if completed_tasks:
         return render_template(
             "task_generation_additional.j2",
             requirements_text=req_text,
+            all_requirements_text=all_req_text,
+            common_validation_text=common_val_text,
             completed_tasks_text=_format_completed_tasks(completed_tasks),
             previous_feedback=previous_feedback or "(none)",
         )
@@ -129,6 +150,8 @@ def build_task_generation_prompt(
     return render_template(
         "task_generation_initial.j2",
         requirements_text=req_text,
+        all_requirements_text=all_req_text,
+        common_validation_text=common_val_text,
     )
 
 
@@ -144,11 +167,20 @@ def build_requirement_verification_prompt(
     )
 
 
-def build_single_requirement_verification_prompt(req: Requirement) -> str:
-    """Build prompt for verifying a single requirement."""
+def build_single_requirement_verification_prompt(
+    req: Requirement,
+    all_requirements: list[Requirement],
+) -> str:
+    """Build prompt for verifying a single requirement.
+
+    Args:
+        req: The requirement to verify
+        all_requirements: All requirements (for context reference)
+    """
     return render_template(
         "single_requirement_verification.j2",
         requirement_text=_format_single_requirement(req),
+        all_requirements_text=_format_requirements(all_requirements),
         requirement_id=req.id,
         criteria_count=len(req.acceptance_criteria),
         design_decisions_count=len(req.design_decisions),

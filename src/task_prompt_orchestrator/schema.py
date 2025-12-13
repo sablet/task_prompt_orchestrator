@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -10,11 +11,10 @@ if TYPE_CHECKING:
     pass
 
 
-def _load_static_template(template_name: str) -> str:
-    """Load a static template (lazy import to avoid circular dependency)."""
-    from .templates import load_static_template
-
-    return load_static_template(template_name)
+def _get_examples_dir() -> Path:
+    """Get the examples directory path."""
+    # Navigate from schema.py -> src/task_prompt_orchestrator -> src -> project root -> examples
+    return Path(__file__).parent.parent.parent / "examples"
 
 
 # =============================================================================
@@ -66,6 +66,7 @@ class TaskDefinition:
     """Complete task definition from YAML."""
 
     tasks: list[Task]
+    common_validation: list[str] = field(default_factory=list)
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "TaskDefinition":
@@ -84,8 +85,9 @@ class TaskDefinition:
                     depends_on=task_data.get("depends_on", []),
                 )
             )
+        common_validation = data.get("common_validation", [])
 
-        return cls(tasks=tasks)
+        return cls(tasks=tasks, common_validation=common_validation)
 
 
 @dataclass
@@ -264,7 +266,7 @@ def detect_yaml_type(yaml_path: str) -> YamlType:
 
 def create_sample_task_yaml() -> str:
     """Return sample YAML content for reference."""
-    return _load_static_template("sample_task_yaml.j2")
+    return (_get_examples_dir() / "sample_tasks.yaml").read_text(encoding="utf-8")
 
 
 # =============================================================================
@@ -321,6 +323,7 @@ class RequirementDefinition:
     """Complete requirement definition from YAML."""
 
     requirements: list[Requirement]
+    common_validation: list[str] = field(default_factory=list)
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> "RequirementDefinition":
@@ -340,8 +343,9 @@ class RequirementDefinition:
             )
             for req in data.get("requirements", [])
         ]
+        common_validation = data.get("common_validation", [])
 
-        return cls(requirements=requirements)
+        return cls(requirements=requirements, common_validation=common_validation)
 
 
 class LoopBStatus(Enum):
@@ -384,6 +388,9 @@ class LoopBExecutionHistory:
     final_result: dict[str, Any] | None = None
     error: str | None = None
     requirements_hash: str | None = None  # SHA256 hash of requirements YAML content
+    # Verification progress tracking (for step mode resume)
+    current_verification_index: int = 0  # Index of requirement being verified
+    partial_verification_results: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
@@ -411,6 +418,8 @@ class LoopBExecutionHistory:
             "final_result": self.final_result,
             "error": self.error,
             "requirements_hash": self.requirements_hash,
+            "current_verification_index": self.current_verification_index,
+            "partial_verification_results": self.partial_verification_results,
         }
 
     @classmethod
@@ -441,9 +450,13 @@ class LoopBExecutionHistory:
             final_result=data.get("final_result"),
             error=data.get("error"),
             requirements_hash=data.get("requirements_hash"),
+            current_verification_index=data.get("current_verification_index", 0),
+            partial_verification_results=data.get("partial_verification_results"),
         )
 
 
 def create_sample_requirements_yaml() -> str:
     """Return sample requirements YAML content for reference."""
-    return _load_static_template("sample_requirements_yaml.j2")
+    return (_get_examples_dir() / "sample_requirements.yaml").read_text(
+        encoding="utf-8"
+    )
