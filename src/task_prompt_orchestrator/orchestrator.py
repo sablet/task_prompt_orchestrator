@@ -514,7 +514,9 @@ async def execute_task(
             if config.step_mode and config._step_executed:
                 logger.info(f"Step mode: stopping after instruction for task {task.id}")
                 if stream:
-                    callback(f"\n{YELLOW}⏸ STEP MODE: stopped after instruction{RESET}\n")
+                    callback(
+                        f"\n{YELLOW}⏸ STEP MODE: stopped after instruction{RESET}\n"
+                    )
                 return StepResult(task_result=result, stopped_after="instruction")
 
         validation_output, approved, feedback = await execute_validation_phase(

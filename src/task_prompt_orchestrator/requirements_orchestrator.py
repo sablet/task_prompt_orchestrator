@@ -28,6 +28,7 @@ from .orchestrator import (
 )
 from .prompts import (
     build_requirement_verification_prompt,
+    build_single_requirement_verification_prompt,
     build_task_generation_prompt,
     check_coverage,
     get_unmet_requirement_ids,
@@ -277,7 +278,10 @@ class RequirementsOrchestrator:
                 # Step 3: Execute Loop C
                 should_resume_loop_c = resume_loop_c and iteration == start_iteration
                 loop_c_result, loop_c_history_id = await self._run_loop_c_step(
-                    iteration, tasks_yaml_path, should_resume_loop_c, num_tasks=len(tasks)
+                    iteration,
+                    tasks_yaml_path,
+                    should_resume_loop_c,
+                    num_tasks=len(tasks),
                 )
 
                 # Update completed tasks
@@ -622,9 +626,7 @@ class RequirementsOrchestrator:
             self.history.final_result = final_result
             self._save_history()
 
-    async def _generate_tasks_with_coverage_warning(
-        self, iteration: int
-    ) -> list[Task]:
+    async def _generate_tasks_with_coverage_warning(self, iteration: int) -> list[Task]:
         """Generate tasks and warn if coverage is incomplete.
 
         Coverage check is informational only - requirement verification loop
@@ -817,35 +819,98 @@ class RequirementsOrchestrator:
                     self.history.completed_task_ids.append(task_id)
             self.all_task_results.append(task_result)
 
+    async def _verify_single_requirement(self, req: "Requirement") -> dict[str, Any]:
+        """Verify a single requirement by actually executing verification steps.
+
+        Args:
+            req: The requirement to verify
+
+        Returns:
+            Verification result for this requirement
+        """
+        from .schema import Requirement  # Avoid circular import at module level
+
+        prompt = build_single_requirement_verification_prompt(req)
+        config = self.config.orchestrator_config
+        callback = self._get_callback()
+
+        if config.stream_output:
+            callback(f"\n{DIM}--- Verifying {req.id}: {req.name} ---{RESET}\n")
+
+        output = await run_claude_query(prompt, config, phase="verification")
+        result = parse_verification_result(output)
+
+        # Ensure requirement_id is set
+        if "requirement_id" not in result:
+            result["requirement_id"] = req.id
+
+        return result
+
     async def _verify_requirements(self) -> dict[str, Any]:
-        """Verify if requirements are met.
+        """Verify if requirements are met by checking each requirement individually.
 
         Raises:
             StepModeStop: If step mode is enabled and a step was executed.
         """
-        # Filter to only approved task results
-        approved_results = [
-            r for r in self.all_task_results if r.status == TaskStatus.APPROVED
-        ]
-
-        prompt = build_requirement_verification_prompt(
-            self.requirements, approved_results
-        )
         config = self.config.orchestrator_config
         callback = self._get_callback()
+
         if config.stream_output:
             callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
-            callback(f"{DIM}>>> PROMPT >>>{RESET}\n")
-            callback(f"{DIM}{prompt}{RESET}\n")
-            callback(f"{DIM}<<< END PROMPT <<<{RESET}\n\n")
-        output = await run_claude_query(prompt, config, phase="verification")
-        result = parse_verification_result(output)
+            callback(
+                f"{CYAN}Starting requirement verification ({len(self.requirements.requirements)} requirements){RESET}\n"
+            )
 
-        # Step mode check after verification
-        if config.step_mode and config._step_executed:
-            raise StepModeStop("verification")
+        # Verify each requirement individually
+        requirement_statuses = []
+        all_met = True
 
-        return result
+        for req in self.requirements.requirements:
+            result = await self._verify_single_requirement(req)
+            met = result.get("met", False)
+            if not met:
+                all_met = False
+
+            requirement_statuses.append(
+                {
+                    "requirement_id": req.id,
+                    "met": met,
+                    "evidence": result.get("summary", ""),
+                    "criteria_results": result.get("criteria_results", []),
+                    "issues": result.get("issues", []),
+                }
+            )
+
+            if config.stream_output:
+                status_icon = f"{GREEN}✓{RESET}" if met else f"{YELLOW}✗{RESET}"
+                callback(f"  {status_icon} {req.id}: {'met' if met else 'not met'}\n")
+
+            # Step mode check after each verification
+            if config.step_mode and config._step_executed:
+                raise StepModeStop("verification")
+
+        # Aggregate results
+        unmet_count = sum(1 for s in requirement_statuses if not s["met"])
+        summary = (
+            "All requirements met"
+            if all_met
+            else f"{unmet_count} of {len(requirement_statuses)} requirements not met"
+        )
+
+        # Build feedback for additional tasks if needed
+        feedback_parts = []
+        for status in requirement_statuses:
+            if not status["met"] and status.get("issues"):
+                feedback_parts.append(
+                    f"{status['requirement_id']}: {', '.join(status['issues'])}"
+                )
+
+        return {
+            "all_requirements_met": all_met,
+            "requirement_status": requirement_statuses,
+            "summary": summary,
+            "feedback_for_additional_tasks": "\n".join(feedback_parts),
+        }
 
 
 async def run_requirements_orchestrator(

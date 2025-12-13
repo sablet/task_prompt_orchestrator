@@ -10,6 +10,7 @@ from task_prompt_orchestrator.prompts import (
     parse_verification_result,
 )
 from task_prompt_orchestrator.schema import (
+    AcceptanceCriterion,
     Requirement,
     RequirementDefinition,
     Task,
@@ -130,7 +131,11 @@ class TestBuildPrompts:
         requirements = RequirementDefinition(
             requirements=[
                 Requirement(
-                    id="req_1", name="Test Requirement", acceptance_criteria=["Done"]
+                    id="req_1",
+                    name="Test Requirement",
+                    acceptance_criteria=[
+                        AcceptanceCriterion(criterion="Done", verify="Check it works")
+                    ],
                 )
             ],
         )
@@ -154,7 +159,15 @@ class TestBuildPrompts:
         """Test verification prompt generation."""
         requirements = RequirementDefinition(
             requirements=[
-                Requirement(id="req_1", name="Test Req", acceptance_criteria=["Works"])
+                Requirement(
+                    id="req_1",
+                    name="Test Req",
+                    acceptance_criteria=[
+                        AcceptanceCriterion(
+                            criterion="Works", verify="Execute and check"
+                        )
+                    ],
+                )
             ],
         )
         results = [TaskResult(task_id="task_1", status=TaskStatus.APPROVED)]

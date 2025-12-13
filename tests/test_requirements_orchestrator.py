@@ -18,6 +18,7 @@ from task_prompt_orchestrator.requirements_orchestrator import (
     RequirementsOrchestratorConfig,
 )
 from task_prompt_orchestrator.schema import (
+    AcceptanceCriterion,
     LoopBStatus,
     OrchestratorResult,
     Requirement,
@@ -36,8 +37,20 @@ def sample_requirements() -> RequirementDefinition:
     """Create sample requirements for testing."""
     return RequirementDefinition(
         requirements=[
-            Requirement(id="req_1", name="Requirement 1", acceptance_criteria=["Done"]),
-            Requirement(id="req_2", name="Requirement 2", acceptance_criteria=["Done"]),
+            Requirement(
+                id="req_1",
+                name="Requirement 1",
+                acceptance_criteria=[
+                    AcceptanceCriterion(criterion="Done", verify="Check")
+                ],
+            ),
+            Requirement(
+                id="req_2",
+                name="Requirement 2",
+                acceptance_criteria=[
+                    AcceptanceCriterion(criterion="Done", verify="Check")
+                ],
+            ),
         ],
     )
 
@@ -59,12 +72,17 @@ tasks:
 
 
 def make_verify_response(all_met: bool, unmet: list[str] | None = None) -> str:
-    """Create mock verification response."""
+    """Create mock verification response (legacy, for all requirements at once)."""
     statuses = ", ".join(
         f'{{"requirement_id": "{r}", "met": {str(r not in (unmet or [])).lower()}}}'
         for r in ["req_1", "req_2"]
     )
     return f'{{"all_requirements_met": {str(all_met).lower()}, "requirement_status": [{statuses}], "feedback_for_additional_tasks": ""}}'
+
+
+def make_single_verify_response(req_id: str, met: bool) -> str:
+    """Create mock verification response for a single requirement."""
+    return f'{{"requirement_id": "{req_id}", "met": {str(met).lower()}, "summary": "Verified", "criteria_results": [], "issues": []}}'
 
 
 def make_mock_result(
@@ -138,9 +156,14 @@ class TestRequirementsOrchestrator:
         """Test single iteration success, multiple iterations, and max iterations failure."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Scenario 1: Single iteration success
+            # Flow: task_gen -> verify req_1 -> verify req_2
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             with self._mock_claude_and_loopc(
-                [make_task_response(), make_verify_response(True)],
+                [
+                    make_task_response(),
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", True),
+                ],
                 [make_mock_result(["task_1"])],
             ):
                 result = await orchestrator.run()
@@ -149,13 +172,16 @@ class TestRequirementsOrchestrator:
             assert "task_1" in result.completed_task_ids
 
             # Scenario 2: Two iterations until success
+            # Flow: task_gen -> verify(fail) -> task_gen -> verify(pass)
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             with self._mock_claude_and_loopc(
                 [
                     make_task_response("t1"),
-                    make_verify_response(False, ["req_2"]),
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", False),  # Fails
                     make_task_response("t2"),
-                    make_verify_response(True),
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", True),
                 ],
                 [make_mock_result(["t1"]), make_mock_result(["t2"])],
             ):
@@ -171,9 +197,11 @@ class TestRequirementsOrchestrator:
             with self._mock_claude_and_loopc(
                 [
                     make_task_response(),
-                    make_verify_response(False, ["req_2"]),
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", False),
                     make_task_response(),
-                    make_verify_response(False, ["req_2"]),
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", False),
                 ],
                 [make_mock_result(["x"]), make_mock_result(["y"])],
             ):
@@ -214,7 +242,11 @@ class TestRequirementsOrchestrator:
             requirements_path="",
         )
         with self._mock_claude_and_loopc(
-            [make_task_response(), make_verify_response(True)],
+            [
+                make_task_response(),
+                make_single_verify_response("req_1", True),
+                make_single_verify_response("req_2", True),
+            ],
             [make_mock_result(["task_1"])],
         ):
             result = await orchestrator.run()
@@ -233,7 +265,11 @@ class TestRequirementsOrchestrator:
                 sample_requirements, temp_dir, max_iter=1
             )
             with self._mock_claude_and_loopc(
-                [make_task_response(), make_verify_response(False, ["req_1", "req_2"])],
+                [
+                    make_task_response(),
+                    make_single_verify_response("req_1", False),
+                    make_single_verify_response("req_2", False),
+                ],
                 [make_mock_result(["task_1"], success=False, failed_ids=["task_1"])],
             ):
                 result = await orchestrator.run()
@@ -265,7 +301,11 @@ class TestRequirementsOrchestrator:
                 sample_requirements, temp_dir, max_iter=1
             )
             with self._mock_claude_and_loopc(
-                [make_task_response("t1"), make_verify_response(False, ["req_2"])],
+                [
+                    make_task_response("t1"),
+                    make_single_verify_response("req_1", True),
+                    make_single_verify_response("req_2", False),
+                ],
                 [make_mock_result(["t1", "t2"], success=False, failed_ids=["t2"])],
             ):
                 result = await orchestrator.run()
@@ -395,7 +435,11 @@ class TestLoopBResumeFromInterruption:
             requirements = RequirementDefinition(
                 requirements=[
                     Requirement(
-                        id="req_1", name="Requirement 1", acceptance_criteria=["Done"]
+                        id="req_1",
+                        name="Requirement 1",
+                        acceptance_criteria=[
+                            AcceptanceCriterion(criterion="Done", verify="Check")
+                        ],
                     ),
                 ]
             )
@@ -452,8 +496,8 @@ class TestLoopBResumeFromInterruption:
                 nonlocal task_gen_call_count
                 if phase == "task_generation":
                     task_gen_call_count += 1
-                # Return verification result
-                return '{"all_requirements_met": true, "requirement_status": [{"requirement_id": "req_1", "met": true}], "feedback_for_additional_tasks": ""}'
+                # Return single requirement verification result (new format)
+                return '{"requirement_id": "req_1", "met": true, "summary": "Verified", "criteria_results": [], "issues": []}'
 
             async def mock_run_orchestrator(*args, **kwargs) -> OrchestratorResult:
                 nonlocal loop_c_call_count
@@ -500,7 +544,11 @@ class TestLoopBResumeFromInterruption:
             requirements = RequirementDefinition(
                 requirements=[
                     Requirement(
-                        id="req_1", name="Requirement 1", acceptance_criteria=["Done"]
+                        id="req_1",
+                        name="Requirement 1",
+                        acceptance_criteria=[
+                            AcceptanceCriterion(criterion="Done", verify="Check")
+                        ],
                     ),
                 ]
             )
@@ -553,8 +601,8 @@ tasks:
       - criterion: "OK"
         covers: [req_1.1]
 ```"""
-                # Return verification result
-                return '{"all_requirements_met": true, "requirement_status": [{"requirement_id": "req_1", "met": true}], "feedback_for_additional_tasks": ""}'
+                # Return single requirement verification result (new format)
+                return '{"requirement_id": "req_1", "met": true, "summary": "Verified", "criteria_results": [], "issues": []}'
 
             async def mock_run_orchestrator(*args, **kwargs) -> OrchestratorResult:
                 nonlocal loop_c_call_count
@@ -600,7 +648,13 @@ tasks:
             manager = LoopBHistoryManager(temp_dir)
             requirements = RequirementDefinition(
                 requirements=[
-                    Requirement(id="req_1", name="Req", acceptance_criteria=["Done"])
+                    Requirement(
+                        id="req_1",
+                        name="Req",
+                        acceptance_criteria=[
+                            AcceptanceCriterion(criterion="Done", verify="Check")
+                        ],
+                    )
                 ]
             )
 
@@ -637,7 +691,13 @@ tasks:
             manager = LoopBHistoryManager(temp_dir)
             requirements = RequirementDefinition(
                 requirements=[
-                    Requirement(id="req_1", name="Req", acceptance_criteria=["Done"])
+                    Requirement(
+                        id="req_1",
+                        name="Req",
+                        acceptance_criteria=[
+                            AcceptanceCriterion(criterion="Done", verify="Check")
+                        ],
+                    )
                 ]
             )
 
@@ -674,7 +734,13 @@ tasks:
             manager = LoopBHistoryManager(temp_dir)
             requirements = RequirementDefinition(
                 requirements=[
-                    Requirement(id="req_1", name="Req", acceptance_criteria=["Done"])
+                    Requirement(
+                        id="req_1",
+                        name="Req",
+                        acceptance_criteria=[
+                            AcceptanceCriterion(criterion="Done", verify="Check")
+                        ],
+                    )
                 ]
             )
 
@@ -771,7 +837,9 @@ class TestStepModeLoopC:
         with patch(
             "task_prompt_orchestrator.orchestrator.run_claude_query",
             new_callable=AsyncMock,
-            side_effect=self._make_mock_claude_query('{"approved": true, "feedback": ""}'),
+            side_effect=self._make_mock_claude_query(
+                '{"approved": true, "feedback": ""}'
+            ),
         ) as mock_query:
             result = await execute_task(
                 task,

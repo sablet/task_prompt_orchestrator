@@ -273,14 +273,47 @@ def create_sample_task_yaml() -> str:
 
 
 @dataclass
+class AcceptanceCriterion:
+    """Single acceptance criterion with verification method."""
+
+    criterion: str
+    verify: str  # How to verify: method + target + expected state
+
+
+@dataclass
 class Requirement:
     """Single requirement definition (similar to Task format)."""
 
     id: str
     name: str
-    acceptance_criteria: list[str]
-    design_decisions: list[str] = field(default_factory=list)  # Technical decisions to verify
+    acceptance_criteria: list[AcceptanceCriterion]
+    design_decisions: list[str] = field(
+        default_factory=list
+    )  # Technical decisions to verify
     notes: str | None = None  # Optional notes for additional context
+
+
+def _parse_acceptance_criteria(criteria_data: list[Any]) -> list[AcceptanceCriterion]:
+    """Parse acceptance criteria from YAML data.
+
+    Supports both formats:
+    - New format: [{"criterion": "...", "verify": "..."}, ...]
+    - Legacy format: ["criterion1", "criterion2", ...]
+    """
+    result = []
+    for item in criteria_data:
+        if isinstance(item, str):
+            # Legacy format: string only, no verify
+            result.append(AcceptanceCriterion(criterion=item, verify=""))
+        elif isinstance(item, dict):
+            # New format: dict with criterion and verify
+            result.append(
+                AcceptanceCriterion(
+                    criterion=item.get("criterion", ""),
+                    verify=item.get("verify", ""),
+                )
+            )
+    return result
 
 
 @dataclass
@@ -299,7 +332,9 @@ class RequirementDefinition:
             Requirement(
                 id=req["id"],
                 name=req["name"],
-                acceptance_criteria=req.get("acceptance_criteria", []),
+                acceptance_criteria=_parse_acceptance_criteria(
+                    req.get("acceptance_criteria", [])
+                ),
                 design_decisions=req.get("design_decisions", []),
                 notes=req.get("notes"),
             )

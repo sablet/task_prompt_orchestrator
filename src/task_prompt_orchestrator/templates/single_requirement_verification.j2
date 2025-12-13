@@ -1,0 +1,88 @@
+# Single Requirement Verification
+
+{{ requirement_text }}
+
+## Instructions
+
+Verify if this requirement ({{ requirement_id }}) is met by actually executing the verification steps.
+
+### Verification Patterns
+
+The verify field uses one of these patterns. Follow the corresponding verification procedure:
+
+| Pattern | Verification Procedure |
+|---------|----------------------|
+| `[metrics_check]` | 1. Run the command/test to generate output 2. Read the output file/object 3. Check that specified properties/values exist |
+| `[cli_test]` | 1. Execute the command with specified arguments 2. Verify exit code (success/failure) 3. Compare outputs with different arguments if specified |
+| `[flow_order]` | 1. Run the test that uses spy/mock 2. Verify the call order matches expected sequence |
+| `[intermediate]` | 1. Run the process that generates intermediate files 2. Read the intermediate file 3. Verify format/properties |
+| `[regression]` | 1. Run the test with fixed seed/input 2. Compare output values against expected (within tolerance) |
+
+**CRITICAL**: For `[metrics_check]`, you MUST:
+1. Actually execute the command/test to generate the report/output
+2. Read the generated file and verify contents
+3. Do NOT just check if the output code exists in implementation
+
+### Examples: Good vs Bad Verification
+
+**BAD - Code existence check (DO NOT DO THIS)**:
+```json
+{
+  "criterion": "選択手法の各メトリクス悲観的推定値が出力される",
+  "met": true,
+  "verification_performed": "Checked implementation code",
+  "evidence": "Implementation in bootstrap_printer.py _print_selected_method_detail() (lines 355-398). Displays pessimistic estimates via _print_bootstrap_analysis_table() (lines 201-257)."
+}
+```
+This is WRONG because it only verified code exists, not that output is correct.
+
+**GOOD - Actual execution and output verification**:
+```json
+{
+  "criterion": "選択手法の各メトリクス悲観的推定値が出力される",
+  "met": true,
+  "verification_performed": "Ran pytest tests/test_bootstrap_report.py::test_percentile_values_in_report",
+  "evidence": "Test location: tests/test_bootstrap_report.py:45-62. Test verifies report contains P5-P95 columns for each metric. Result: PASSED. Actual output verified: '| Sharpe | 0.82 | 0.45 | 0.58 | 0.72 | 0.85 | 0.91 |'"
+}
+```
+This is CORRECT because:
+- Specifies exact test file and function
+- Describes what the test verifies
+- Shows test result (PASSED/FAILED)
+- Includes actual output as evidence
+
+### Verification Process
+
+For each acceptance criterion:
+1. Identify the pattern from the verify field prefix (e.g., `[metrics_check]`)
+2. Follow the corresponding verification procedure above
+3. Record evidence from the actual execution result
+
+### Important
+
+- Do NOT judge based on whether code exists
+- Do NOT assume implementation is correct without verification
+- Actually execute and observe the results
+- If verify field is empty, determine appropriate verification method based on criterion
+
+### Output Format
+
+Output in JSON format:
+```json
+{
+  "requirement_id": "{{ requirement_id }}",
+  "met": true/false,
+  "criteria_results": [
+    {
+      "criterion_index": 1,
+      "criterion": "The criterion text",
+      "met": true/false,
+      "verification_performed": "What you actually did to verify",
+      "evidence": "Actual output/result observed"
+    }
+  ],
+  "design_decisions_met": true/false,
+  "summary": "Brief summary of verification result",
+  "issues": ["List of issues if any criteria not met"]
+}
+```

@@ -6,8 +6,36 @@
 ### Completed Tasks
 {{ task_results_text }}
 
+### Verification Patterns
+
+The verify field uses one of these patterns. Follow the corresponding verification procedure:
+
+| Pattern | Verification Procedure |
+|---------|----------------------|
+| `[metrics_check]` | Run command/test → Read output file/object → Check properties/values exist |
+| `[cli_test]` | Execute command → Verify exit code → Compare outputs with different arguments |
+| `[flow_order]` | Run test with spy/mock → Verify call order matches expected |
+| `[intermediate]` | Run process → Read intermediate file → Verify format/properties |
+| `[regression]` | Run test with fixed seed → Compare output values within tolerance |
+
+**CRITICAL**: Do NOT just check if code exists. Actually execute and verify output.
+
+### Examples: Good vs Bad Verification
+
+**BAD (DO NOT DO THIS)**:
+```
+"evidence": "Implementation in bootstrap_printer.py _print_selected_method_detail() (lines 355-398)."
+```
+→ WRONG: Only checked code exists, not test execution.
+
+**GOOD**:
+```
+"evidence": "Test: tests/test_bootstrap_report.py::test_percentile_output (lines 45-62). Verifies P5-P95 values in report. Result: PASSED. Output: '| Sharpe | 0.82 | 0.45 |'"
+```
+→ CORRECT: Test location, what it verifies, result, actual output.
+
 ### Instructions
-Verify if each requirement's acceptance criteria and design decisions are met based on completed tasks.
+Verify if each requirement's acceptance criteria and design decisions are met by actually executing the verification steps.
 
 Output in JSON format:
 ```json

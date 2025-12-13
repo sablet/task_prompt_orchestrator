@@ -5,31 +5,58 @@
 # then executes Loop C for each generated task set.
 #
 # - acceptance_criteria: ユーザー視点の要件（何が欲しいか）
+#   - criterion: 検証可能な基準
+#   - verify: 検証パターン + 対象 + 期待状態
 # - design_decisions: 技術視点の判断（どう実現するか）※オプション
+#
+# verify の記述パターン（pytest で検証可能な振る舞いに限定）:
+#   [metrics_check]  - レポート/オブジェクトのプロパティ・値確認
+#   [cli_test]       - コマンド実行成功・引数による出力差分
+#   [flow_order]     - spy/mock による呼び出し順序検証
+#   [intermediate]   - 中間生成物のフォーマット・プロパティ検証
+#   [regression]     - 数値の許容誤差内一致（実装後に追加）
 
 requirements:
-  - id: req_greeting
-    name: 基本的な挨拶関数の実装
+  - id: req_csv_export
+    name: CSV形式でのデータエクスポート
     notes: |
-      output/greeting.py に実装する。
+      売上データをCSV形式でエクスポートする機能。
+      対象情報: 日付、商品名、カテゴリ、金額
     acceptance_criteria:
-      - "hello(name) 関数が 'Hello, {name}!' を返す"
-      - "デフォルト引数で hello() を呼ぶと 'Hello, World!' を返す"
-    design_decisions:  # オプション
-      - "型ヒントを使用する"
+      - criterion: "指定した期間の売上データがCSVファイルとして出力される"
+        verify: "[metrics_check] 出力CSVに指定期間内のデータのみが含まれている"
+      - criterion: "CSVにはヘッダー行が含まれる"
+        verify: "[metrics_check] CSVファイルの先頭行に列名（日付、商品名等）が存在する"
+      - criterion: "日付は年月日がわかる形式で出力される"
+        verify: "[metrics_check] CSVの日付列が年月日を判読できる形式である"
 
-  - id: req_variations
-    name: 挨拶バリエーションの追加
+  - id: req_category_filter
+    name: カテゴリによるフィルタリング
     acceptance_criteria:
-      - "goodbye(name) 関数が 'Goodbye, {name}!' を返す"
-      - "greet(name, greeting) で任意の挨拶ができる"
+      - criterion: "特定のカテゴリのみを抽出して出力できる"
+        verify: "[cli_test] カテゴリ指定オプションで実行成功。出力CSVが指定カテゴリのみ含む"
+      - criterion: "該当データがない場合でもエラーにならない"
+        verify: "[cli_test] 存在しないカテゴリで実行成功。ヘッダーのみのCSVが出力される"
     # design_decisions は省略可
 
-  - id: req_tests
-    name: ユニットテストの作成
+  - id: req_error_handling
+    name: エラーハンドリング
     acceptance_criteria:
-      - "pytest で実行可能なテストファイルが存在"
-      - "全関数に対して最低2つのテストケース"
-      - "全テストがパスする"
+      - criterion: "不正な日付を指定した場合、わかりやすいエラーが表示される"
+        verify: "[cli_test] 不正な日付で実行。エラー終了し、日付形式エラーのメッセージが出力される"
+      - criterion: "開始日が終了日より後の場合、エラーが表示される"
+        verify: "[cli_test] 矛盾した期間で実行。エラー終了し、期間矛盾のメッセージが出力される"
+
+  - id: req_tests
+    name: テストカバレッジ
+    acceptance_criteria:
+      - criterion: "正常な期間指定でCSVが生成されることをテストしている"
+        verify: "[metrics_check] 有効期間でのCSV生成テストが存在し、成功する"
+      - criterion: "期間が1日の場合も正しく動作することをテストしている"
+        verify: "[metrics_check] 開始日=終了日のテストが存在し、成功する"
+      - criterion: "不正な入力でエラーになることをテストしている"
+        verify: "[metrics_check] 不正入力のエラーテストが存在し、成功する"
+      - criterion: "カテゴリフィルタが正しく動作することをテストしている"
+        verify: "[metrics_check] カテゴリフィルタのテストが存在し、成功する"
     design_decisions:
-      - "pytest を使用する"
+      - "pytestを使用する"

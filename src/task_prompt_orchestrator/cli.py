@@ -251,7 +251,16 @@ def build_orchestrator_config(args: argparse.Namespace) -> OrchestratorConfig:
     """Build OrchestratorConfig from parsed arguments."""
     cwd = args.cwd or str(Path.cwd())
 
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "NotebookEdit", "Task"]
+    allowed_tools = [
+        "Read",
+        "Write",
+        "Edit",
+        "Bash",
+        "Glob",
+        "Grep",
+        "NotebookEdit",
+        "Task",
+    ]
     if not args.no_web:
         allowed_tools.extend(["WebFetch", "WebSearch"])
 
@@ -765,7 +774,10 @@ def _build_plan_initial_prompt(target: str, file_path: str | None) -> str:
         file_context = f"\n\n## 対象ファイル\n\n修正対象: `{file_path}`\n\nまずこのファイルを読み込んで内容を確認してください。"
         return base_prompt + file_context
 
-    return base_prompt + "\n\n## モード\n\n新規作成モードです。目的・背景をヒアリングしてください。"
+    return (
+        base_prompt
+        + "\n\n## モード\n\n新規作成モードです。目的・背景をヒアリングしてください。"
+    )
 
 
 def _find_claude_cli() -> str | None:

@@ -6,8 +6,22 @@ from typing import Any
 
 import yaml
 
-from .schema import Requirement, RequirementDefinition, Task, TaskResult, ValidationItem
+from .schema import (
+    AcceptanceCriterion,
+    Requirement,
+    RequirementDefinition,
+    Task,
+    TaskResult,
+    ValidationItem,
+)
 from .templates import render_template
+
+
+def _format_criterion_text(ac: AcceptanceCriterion) -> str:
+    """Format a single acceptance criterion with optional verify."""
+    if ac.verify:
+        return f"{ac.criterion}\n      - **Verify**: {ac.verify}"
+    return ac.criterion
 
 
 def _format_requirements_with_ids(requirements: list[Requirement]) -> str:
@@ -18,9 +32,9 @@ def _format_requirements_with_ids(requirements: list[Requirement]) -> str:
         if req.notes:
             lines.append(f"**Notes**: {req.notes}")
         lines.append("**Acceptance Criteria**:")
-        for i, criterion in enumerate(req.acceptance_criteria, 1):
+        for i, ac in enumerate(req.acceptance_criteria, 1):
             criterion_id = f"{req.id}.{i}"
-            lines.append(f"  - `{criterion_id}`: {criterion}")
+            lines.append(f"  - `{criterion_id}`: {_format_criterion_text(ac)}")
         if req.design_decisions:
             lines.append("**Design Decisions**:")
             for i, decision in enumerate(req.design_decisions, 1):
@@ -38,12 +52,33 @@ def _format_requirements(requirements: list[Requirement]) -> str:
         if req.notes:
             lines.append(f"**Notes**: {req.notes}")
         lines.append("**Acceptance Criteria**:")
-        for criterion in req.acceptance_criteria:
-            lines.append(f"  - {criterion}")
+        for ac in req.acceptance_criteria:
+            lines.append(f"  - {_format_criterion_text(ac)}")
         if req.design_decisions:
             lines.append("**Design Decisions**:")
             for decision in req.design_decisions:
                 lines.append(f"  - {decision}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _format_single_requirement(req: Requirement) -> str:
+    """Format a single requirement for verification prompt."""
+    lines = []
+    lines.append(f"## {req.id}: {req.name}")
+    if req.notes:
+        lines.append(f"**Notes**: {req.notes}")
+    lines.append("")
+    lines.append("### Acceptance Criteria")
+    for i, ac in enumerate(req.acceptance_criteria, 1):
+        lines.append(f"**{i}. {ac.criterion}**")
+        if ac.verify:
+            lines.append(f"   - Verify: {ac.verify}")
+        lines.append("")
+    if req.design_decisions:
+        lines.append("### Design Decisions")
+        for i, decision in enumerate(req.design_decisions, 1):
+            lines.append(f"{i}. {decision}")
         lines.append("")
     return "\n".join(lines)
 
@@ -101,11 +136,22 @@ def build_requirement_verification_prompt(
     requirements: RequirementDefinition,
     completed_task_results: list[TaskResult],
 ) -> str:
-    """Build prompt for verifying if requirements are met."""
+    """Build prompt for verifying if requirements are met (legacy, all at once)."""
     return render_template(
         "requirement_verification.j2",
         requirements_text=_format_requirements(requirements.requirements),
         task_results_text=_format_task_results(completed_task_results),
+    )
+
+
+def build_single_requirement_verification_prompt(req: Requirement) -> str:
+    """Build prompt for verifying a single requirement."""
+    return render_template(
+        "single_requirement_verification.j2",
+        requirement_text=_format_single_requirement(req),
+        requirement_id=req.id,
+        criteria_count=len(req.acceptance_criteria),
+        design_decisions_count=len(req.design_decisions),
     )
 
 

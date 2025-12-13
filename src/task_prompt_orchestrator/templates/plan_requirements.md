@@ -21,6 +21,41 @@ Loop B で自動検証するための **要件** と **設計判断** を定義�
 
 両方とも実装後に LLM が検証する。`design_decisions` はオプション（技術判断が不要な場合は省略可）。
 
+## acceptance_criteria の構造
+
+各 acceptance_criteria は以下の2要素で構成される：
+
+| フィールド | 説明 | 必須 |
+|------------|------|------|
+| `criterion` | ユーザー視点の検証可能な基準 | はい |
+| `verify` | 検証方法（方法 + 対象 + 期待状態） | はい |
+
+### verify の記述パターン
+
+verify は以下の5パターンのいずれかで記述する（pytest で検証可能な振る舞いに限定）:
+
+| パターン | 目的 | チェック対象 |
+|----------|------|--------------|
+| `[metrics_check]` | 最終/中間指標の確認 | レポートファイル or オブジェクトのプロパティ・値 |
+| `[cli_test]` | コマンドUIテスト | コマンド実行の成功、引数による出力差分 |
+| `[flow_order]` | データフロー順序の確認 | spy/mock による呼び出し順序 |
+| `[intermediate]` | 中間生成物の検証 | 中間ファイルのフォーマット・プロパティ |
+| `[regression]` | リグレッションテスト | 数値メトリクスの許容誤差内一致 |
+
+### verify の書き方例
+
+| criterion | verify |
+|-----------|--------|
+| validation期間のメトリクス悲観的推定値が計算される | `[metrics_check]` レポートにSharpe/OptMetricの5%/20%/50%パーセンタイル値が出力されている |
+| CLIオプションで足切り基準を指定できる | `[cli_test]` --cutoff-pct オプションで実行成功。異なる値で選択結果が変わる |
+| bootstrap計算後に選択処理が実行される | `[flow_order]` compute_bootstrap → select_method の順で呼び出される |
+| ACFプロファイルが中間出力される | `[intermediate]` 中間ファイルにlag 1-20のACF値が出力されている |
+| 同じseedで同一結果が得られる | `[regression]` seed=42で2回実行し、全メトリクス値が一致する |
+
+**注意**:
+- `[regression]` は実装完了後に追加するもの。要件定義時点では他の4パターンを使用
+- 技術的な具体値（引数名、エラーメッセージ文言等）は書かない。実装前に書ける自然な言葉で記述する
+
 ## 可視化資料（要件判断の材料）
 
 テキストで記述するより、図表やサンプル出力を見せた方が acceptance_criteria / design_decisions を明確に判断できるケースがある。
@@ -98,15 +133,18 @@ requirements:
     notes: |
       {補足情報・背景・制約など}
     acceptance_criteria:
-      - "{ユーザー観点の検証可能な基準1}"
-      - "{ユーザー観点の検証可能な基準2}"
+      - criterion: "{ユーザー観点の検証可能な基準1}"
+        verify: "[metrics_check] {対象}に{期待するプロパティ・値}が存在する"
+      - criterion: "{ユーザー観点の検証可能な基準2}"
+        verify: "[cli_test] {コマンド}で実行成功。{条件}で出力が変わる"
     design_decisions:  # オプション
       - "{技術選択の検証可能な基準}"
 
   - id: req_2
     name: {要件名}
     acceptance_criteria:
-      - "{受け入れ基準}"
+      - criterion: "{受け入れ基準}"
+        verify: "[intermediate] {中間生成物}に{期待するフォーマット・プロパティ}がある"
     # design_decisions は省略可
 ```
 
