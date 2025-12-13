@@ -37,7 +37,8 @@ deps: ## 依存関係チェック
 module-lines: ## モジュール行数チェック
 	uv run pylint $(LINT_DIRS) --rcfile=pyproject.toml
 
-check: format duplication module-lines lint typecheck complexity #callgraph
+# check: format duplication module-lines lint typecheck complexity
+check: format duplication lint-filesize lint typecheck complexity
 
 loc: ## Pythonファイル行数（output/venv/0行除く、500行以上は赤字）
 	@find . -name "*.py" -type f ! -path "./.venv/*" ! -path "./venv/*" ! -path "./*env/*" ! -path "./output/*" | while read f; do \
@@ -50,4 +51,20 @@ loc: ## Pythonファイル行数（output/venv/0行除く、500行以上は赤�
 			fi; \
 		fi; \
 	done | sort -t/ -k2,2 -k3,3 -k4,4 -k5,5
+
+lint-filesize: ## ファイルサイズチェック（500行超:WARN, 1000行超:ERROR）
+	@has_error=0; has_warn=0; \
+	find $(LINT_DIRS) -name "*.py" -type f | while read f; do \
+		lines=$$(wc -l < "$$f"); \
+		if [ "$$lines" -gt 1000 ]; then \
+			printf "\033[31mERROR: %s (%d lines)\033[0m\n" "$$f" "$$lines"; \
+			echo "error" > /tmp/lint-filesize-status; \
+		elif [ "$$lines" -gt 500 ]; then \
+			printf "\033[33mWARN:  %s (%d lines)\033[0m\n" "$$f" "$$lines"; \
+			[ ! -f /tmp/lint-filesize-status ] && echo "warn" > /tmp/lint-filesize-status; \
+		fi; \
+	done; \
+	status=$$(cat /tmp/lint-filesize-status 2>/dev/null); rm -f /tmp/lint-filesize-status; \
+	if [ "$$status" = "error" ]; then echo "\n1000行超のファイルがあります"; exit 1; \
+	elif [ "$$status" = "warn" ]; then echo "\n500行超のファイルがあります（リファクタリング推奨、1000行オーバーは必須）"; fi
 

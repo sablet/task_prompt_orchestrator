@@ -6,14 +6,14 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .orchestrator import HistoryManager, OrchestratorConfig
-from .prompts import build_task_generation_prompt
-from .requirements_orchestrator import (
+from .loopb_history import (
     LoopBHistoryManager,
-    RequirementsOrchestrator,
     RequirementsOrchestratorConfig,
     compute_file_hash,
 )
+from .orchestrator import HistoryManager, OrchestratorConfig
+from .prompts import build_task_generation_prompt
+from .requirements_orchestrator import RequirementsOrchestrator
 from .schema import (
     LoopBExecutionHistory,
     LoopBStatus,
@@ -96,7 +96,11 @@ def print_loopb_dry_run(args: argparse.Namespace) -> int:
     print("## Task Generation Prompt (iteration 1)")
     print("=" * 70)
     print()
-    prompt = build_task_generation_prompt(requirements)
+    prompt = build_task_generation_prompt(
+        unmet_requirements=list(requirements.requirements),
+        all_requirements=list(requirements.requirements),
+        common_validation=requirements.common_validation or [],
+    )
     if len(prompt) > 2000:
         print(prompt[:2000])
         print(f"\n... (truncated, total {len(prompt)} chars)")

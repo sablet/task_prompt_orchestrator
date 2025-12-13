@@ -239,11 +239,16 @@ class TestRequirementsOrchestrator:
                 return "invalid yaml"
 
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=mock_query,
             ):
-                result = await orchestrator.run()
+                with patch(
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
+                    new_callable=AsyncMock,
+                    side_effect=mock_query,
+                ):
+                    result = await orchestrator.run()
             assert result.status == LoopBStatus.FAILED
             assert "Failed to generate tasks" in (result.error or "")
 
@@ -310,22 +315,26 @@ class TestRequirementsOrchestrator:
                 sample_requirements, temp_dir, max_iter=1
             )
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=[
                     # Pre-verification
                     make_single_verify_response("req_1", False),
                     make_single_verify_response("req_2", False),
-                    make_task_response(),
                 ],
             ):
                 with patch(
-                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
                     new_callable=AsyncMock,
-                    side_effect=RuntimeError("Loop C crashed"),
+                    side_effect=[make_task_response()],
                 ):
-                    with pytest.raises(RuntimeError, match="Loop C crashed"):
-                        await orchestrator.run()
+                    with patch(
+                        "task_prompt_orchestrator.loopb_tasks.run_orchestrator",
+                        new_callable=AsyncMock,
+                        side_effect=RuntimeError("Loop C crashed"),
+                    ):
+                        with pytest.raises(RuntimeError, match="Loop C crashed"):
+                            await orchestrator.run()
 
             # Scenario 3: Partial success - some tasks approved, some failed
             orchestrator = self._create_orchestrator(
@@ -370,26 +379,39 @@ class TestRequirementsOrchestrator:
         claude_responses: list[str], loopc_results: list[OrchestratorResult]
     ):
         """Context manager to mock both run_claude_query and run_orchestrator."""
-        claude_mock = patch(
-            "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+        # Use a shared iterator so both mocks consume from the same sequence
+        response_iter = iter(claude_responses)
+
+        async def shared_side_effect(*args, **kwargs):
+            return next(response_iter)
+
+        claude_mock_verification = patch(
+            "task_prompt_orchestrator.loopb_verification.run_claude_query",
             new_callable=AsyncMock,
-            side_effect=claude_responses,
+            side_effect=shared_side_effect,
+        )
+        claude_mock_tasks = patch(
+            "task_prompt_orchestrator.loopb_tasks.run_claude_query",
+            new_callable=AsyncMock,
+            side_effect=shared_side_effect,
         )
         loopc_mock = patch(
-            "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+            "task_prompt_orchestrator.loopb_tasks.run_orchestrator",
             new_callable=AsyncMock,
             side_effect=loopc_results,
         )
 
         class CombinedContext:
             def __enter__(self):
-                self.c = claude_mock.__enter__()
+                self.cv = claude_mock_verification.__enter__()
+                self.ct = claude_mock_tasks.__enter__()
                 self.l = loopc_mock.__enter__()
                 return self
 
             def __exit__(self, *args):
                 loopc_mock.__exit__(*args)
-                claude_mock.__exit__(*args)
+                claude_mock_tasks.__exit__(*args)
+                claude_mock_verification.__exit__(*args)
 
         return CombinedContext()
 
@@ -549,16 +571,21 @@ class TestLoopBResumeFromInterruption:
                 )
 
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=mock_claude_query,
             ):
                 with patch(
-                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
                     new_callable=AsyncMock,
-                    side_effect=mock_run_orchestrator,
+                    side_effect=mock_claude_query,
                 ):
-                    result = await orchestrator.resume(history)
+                    with patch(
+                        "task_prompt_orchestrator.loopb_tasks.run_orchestrator",
+                        new_callable=AsyncMock,
+                        side_effect=mock_run_orchestrator,
+                    ):
+                        result = await orchestrator.resume(history)
 
             # Verify: task generation should NOT have been called (tasks already exist)
             assert (
@@ -665,16 +692,21 @@ tasks:
                 )
 
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=mock_claude_query,
             ):
                 with patch(
-                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
                     new_callable=AsyncMock,
-                    side_effect=mock_run_orchestrator,
+                    side_effect=mock_claude_query,
                 ):
-                    result = await orchestrator.resume(history)
+                    with patch(
+                        "task_prompt_orchestrator.loopb_tasks.run_orchestrator",
+                        new_callable=AsyncMock,
+                        side_effect=mock_run_orchestrator,
+                    ):
+                        result = await orchestrator.resume(history)
 
             # Verify: task generation SHOULD have been called
             assert (
@@ -1009,11 +1041,16 @@ class TestStepModeLoopB:
 
             # Mock run_claude_query for pre-verification
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=mock_query,
             ):
-                result = await orchestrator.run()
+                with patch(
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
+                    new_callable=AsyncMock,
+                    side_effect=mock_query,
+                ):
+                    result = await orchestrator.run()
 
             # Should stop after first pre-verification call (step mode)
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
@@ -1065,11 +1102,16 @@ class TestStepModeLoopB:
                     return make_task_response()
 
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=mock_claude_query,
             ):
-                result = await orchestrator.run()
+                with patch(
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
+                    new_callable=AsyncMock,
+                    side_effect=mock_claude_query,
+                ):
+                    result = await orchestrator.run()
 
             # Should stop after task generation (StepModeStop raised)
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
@@ -1132,16 +1174,21 @@ class TestStepModeLoopB:
                 )
 
             with patch(
-                "task_prompt_orchestrator.requirements_orchestrator.run_claude_query",
+                "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=mock_claude_query,
             ):
                 with patch(
-                    "task_prompt_orchestrator.requirements_orchestrator.run_orchestrator",
+                    "task_prompt_orchestrator.loopb_tasks.run_claude_query",
                     new_callable=AsyncMock,
-                    side_effect=mock_run_orchestrator,
+                    side_effect=mock_claude_query,
                 ):
-                    result = await orchestrator.run()
+                    with patch(
+                        "task_prompt_orchestrator.loopb_tasks.run_orchestrator",
+                        new_callable=AsyncMock,
+                        side_effect=mock_run_orchestrator,
+                    ):
+                        result = await orchestrator.run()
 
             # Should stop after Loop C returns step_stopped
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
