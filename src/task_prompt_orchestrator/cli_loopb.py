@@ -100,7 +100,7 @@ def print_loopb_dry_run(args: argparse.Namespace) -> int:
     print()
     prompt = build_task_generation_prompt(
         unmet_requirements=list(requirements.requirements),
-        all_requirements=list(requirements.requirements),
+        all_requirements_path=str(requirements_path),
         common_validation=requirements.common_validation or [],
     )
     if len(prompt) > 2000:

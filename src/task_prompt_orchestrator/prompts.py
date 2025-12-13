@@ -119,39 +119,42 @@ def _format_common_validation(common_validation: list[str]) -> str:
 
 def build_task_generation_prompt(
     unmet_requirements: list[Requirement],
-    all_requirements: list[Requirement],
+    all_requirements_path: str | None,
     common_validation: list[str],
     completed_tasks: list[Task] | None = None,
     previous_feedback: str | None = None,
+    exploration_path: str | None = None,
 ) -> str:
     """Build prompt for generating tasks from unmet requirements.
 
     Args:
         unmet_requirements: Requirements that are not yet met (task generation target)
-        all_requirements: All requirements (for context reference)
+        all_requirements_path: Path to requirements YAML file (for context reference)
         common_validation: Common validation criteria for all tasks
         completed_tasks: Previously completed tasks (for additional task generation)
         previous_feedback: Feedback from previous verification
+        exploration_path: Path to pre-collected exploration context file (optional)
     """
     req_text = _format_requirements_with_ids(unmet_requirements)
-    all_req_text = _format_requirements(all_requirements)
     common_val_text = _format_common_validation(common_validation)
 
     if completed_tasks:
         return render_template(
             "task_generation_additional.j2",
             requirements_text=req_text,
-            all_requirements_text=all_req_text,
+            all_requirements_path=all_requirements_path,
             common_validation_text=common_val_text,
             completed_tasks_text=_format_completed_tasks(completed_tasks),
             previous_feedback=previous_feedback or "(none)",
+            exploration_path=exploration_path,
         )
 
     return render_template(
         "task_generation_initial.j2",
         requirements_text=req_text,
-        all_requirements_text=all_req_text,
+        all_requirements_path=all_requirements_path,
         common_validation_text=common_val_text,
+        exploration_path=exploration_path,
     )
 
 
@@ -167,23 +170,40 @@ def build_requirement_verification_prompt(
     )
 
 
+def build_shared_exploration_prompt(
+    all_requirements_path: str,
+) -> str:
+    """Build prompt for shared codebase exploration before verification.
+
+    Args:
+        all_requirements_path: Path to requirements YAML file
+    """
+    return render_template(
+        "shared_exploration.j2",
+        all_requirements_path=all_requirements_path,
+    )
+
+
 def build_single_requirement_verification_prompt(
     req: Requirement,
-    all_requirements: list[Requirement],
+    all_requirements_path: str | None = None,
+    exploration_path: str | None = None,
 ) -> str:
     """Build prompt for verifying a single requirement.
 
     Args:
         req: The requirement to verify
-        all_requirements: All requirements (for context reference)
+        all_requirements_path: Path to requirements YAML file (for context reference)
+        exploration_path: Path to pre-collected exploration context file (optional)
     """
     return render_template(
         "single_requirement_verification.j2",
         requirement_text=_format_single_requirement(req),
-        all_requirements_text=_format_requirements(all_requirements),
+        all_requirements_path=all_requirements_path,
         requirement_id=req.id,
         criteria_count=len(req.acceptance_criteria),
         design_decisions_count=len(req.design_decisions),
+        exploration_path=exploration_path,
     )
 
 

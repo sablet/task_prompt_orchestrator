@@ -179,10 +179,11 @@ class TaskGenerationMixin:
 
         prompt = build_task_generation_prompt(
             unmet_requirements=unmet_requirements,
-            all_requirements=list(self.requirements.requirements),
+            all_requirements_path=self.requirements_path,
             common_validation=self.requirements.common_validation,
             completed_tasks=self.all_completed_tasks if iteration > 0 else None,
             previous_feedback=previous_feedback,
+            exploration_path=self.history.shared_exploration_path,
         )
 
         config = self.config.orchestrator_config
@@ -270,6 +271,7 @@ class TaskGenerationMixin:
         self, tasks_yaml_path: str, resume: bool = False
     ) -> tuple[OrchestratorResult, str | None]:
         """Execute Loop C with the generated tasks."""
+        assert self.history is not None
         task_definition = TaskDefinition.from_yaml(tasks_yaml_path)
         resume_history = None
         resume_point = None
@@ -297,6 +299,7 @@ class TaskGenerationMixin:
             history_manager=self.loop_c_history_manager,
             resume_point=resume_point,
             resume_history=resume_history,
+            exploration_path=self.history.shared_exploration_path,
         )
 
         loop_c_history_id = None

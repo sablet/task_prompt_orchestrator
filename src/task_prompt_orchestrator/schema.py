@@ -391,6 +391,9 @@ class LoopBExecutionHistory:
     # Verification progress tracking (for step mode resume)
     current_verification_index: int = 0  # Index of requirement being verified
     partial_verification_results: list[dict[str, Any]] | None = None
+    # Shared exploration file path (codebase context, test results, artifacts)
+    shared_exploration_path: str | None = None
+    shared_exploration_iteration: int | None = None  # Which iteration this belongs to
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dictionary for JSON storage."""
@@ -420,6 +423,8 @@ class LoopBExecutionHistory:
             "requirements_hash": self.requirements_hash,
             "current_verification_index": self.current_verification_index,
             "partial_verification_results": self.partial_verification_results,
+            "shared_exploration_path": self.shared_exploration_path,
+            "shared_exploration_iteration": self.shared_exploration_iteration,
         }
 
     @classmethod
@@ -452,6 +457,8 @@ class LoopBExecutionHistory:
             requirements_hash=data.get("requirements_hash"),
             current_verification_index=data.get("current_verification_index", 0),
             partial_verification_results=data.get("partial_verification_results"),
+            shared_exploration_path=data.get("shared_exploration_path"),
+            shared_exploration_iteration=data.get("shared_exploration_iteration"),
         )
 
 

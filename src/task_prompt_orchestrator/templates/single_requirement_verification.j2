@@ -1,9 +1,29 @@
 # Single Requirement Verification
+{% if exploration_path %}
+
+## 事前調査・実行結果（参照用）
+
+事前に実施したコードベース調査とコマンド実行の結果が以下のファイルに保存されています。
+**まず最初にこのファイルを読み、その情報を最大限活用してください。同じコマンドの再実行や探索は省略してください。**
+
+```
+{{ exploration_path }}
+```
+
+---
+{% endif %}
+{% if all_requirements_path %}
 
 ## コンテキスト（参照用）
-以下は全要件の一覧です。検証時に環境制約やパス情報などを参照してください。
+全要件の定義が以下のファイルに記載されています。
+検証時に環境制約やパス情報などを参照する必要があれば、このファイルを読んでください。
 
-{{ all_requirements_text }}
+```
+{{ all_requirements_path }}
+```
+
+---
+{% endif %}
 
 ## 検証対象
 {{ requirement_text }}
@@ -71,6 +91,8 @@ For each acceptance criterion:
 - Do NOT assume implementation is correct without verification
 - Actually execute and observe the results
 - If verify field is empty, determine appropriate verification method based on criterion
+{% if exploration_path %}- First read the exploration file above, then use the pre-collected context; avoid redundant exploration or command re-execution
+- Only fetch additional information if not already provided in the exploration file{% endif %}
 
 ### Output Format
 

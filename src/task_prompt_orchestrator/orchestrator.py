@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     query,
 )
 
+from .models import MODEL_DEFAULT
 from .schema import (
     ExecutionHistory,
     ExecutionPhase,
@@ -71,7 +72,7 @@ class OrchestratorConfig:
         ]
     )
     cwd: str | None = None
-    model: str | None = None
+    model: str | None = MODEL_DEFAULT
     permission_mode: str = "acceptEdits"
     stream_output: bool = True
     stream_callback: Callable[[str], None] | None = None
@@ -242,13 +243,18 @@ class HistoryManager:
         return False
 
 
-def build_instruction_prompt(task: Task, cwd: str | None = None) -> str:
+def build_instruction_prompt(
+    task: Task,
+    cwd: str | None = None,
+    exploration_path: str | None = None,
+) -> str:
     """Build prompt for task instruction execution."""
     return render_template(
         "task_instruction.j2",
         task_name=task.name,
         cwd=cwd,
         instruction=task.instruction,
+        exploration_path=exploration_path,
     )
 
 
@@ -256,6 +262,7 @@ def build_validation_prompt(
     task: Task,
     instruction_output: str,
     common_validation: list[str] | None = None,
+    exploration_path: str | None = None,
 ) -> str:
     """Build prompt for task validation."""
     return render_template(
@@ -265,6 +272,7 @@ def build_validation_prompt(
         instruction_output=instruction_output,
         validation_criteria=task.validation,
         common_validation=common_validation or [],
+        exploration_path=exploration_path,
     )
 
 
@@ -379,9 +387,18 @@ class StepModeInterrupt(Exception):
 
 
 async def run_claude_query(
-    prompt: str, config: OrchestratorConfig, phase: str = ""
+    prompt: str,
+    config: OrchestratorConfig,
+    phase: str = "",
+    model_override: str | None = None,
 ) -> str:
     """Run a single Claude Code query and return text output with streaming.
+
+    Args:
+        prompt: The prompt to send to Claude.
+        config: Orchestrator configuration.
+        phase: Optional phase name for logging/debugging.
+        model_override: Optional model to use instead of config.model.
 
     Raises:
         StepModeInterrupt: If step_mode is True, raised after query completes.
@@ -392,8 +409,9 @@ async def run_claude_query(
     )
     if config.cwd:
         options.cwd = config.cwd
-    if config.model:
-        options.model = config.model
+    model_to_use = model_override or config.model
+    if model_to_use:
+        options.model = model_to_use
 
     output_parts: list[str] = []
     callback = config.stream_callback or default_stream_callback
@@ -432,12 +450,15 @@ async def execute_instruction_phase(
     total_tasks: int,
     attempt: int,
     previous_feedback: str | None = None,
+    exploration_path: str | None = None,
 ) -> str:
     """Execute the instruction phase of a task. Returns instruction output."""
     callback = config.stream_callback or default_stream_callback
     stream = config.stream_output
 
-    instruction_prompt = build_instruction_prompt(task, cwd=config.cwd)
+    instruction_prompt = build_instruction_prompt(
+        task, cwd=config.cwd, exploration_path=exploration_path
+    )
     if previous_feedback:
         instruction_prompt += f"\n\n### Previous Attempt Feedback:\n{previous_feedback}\n\nPlease address the issues noted above."
 
@@ -463,13 +484,14 @@ async def execute_validation_phase(
     total_tasks: int,
     instruction_output: str,
     common_validation: list[str] | None = None,
+    exploration_path: str | None = None,
 ) -> tuple[str, bool, str]:
     """Execute the validation phase of a task. Returns (output, approved, feedback)."""
     callback = config.stream_callback or default_stream_callback
     stream = config.stream_output
 
     validation_prompt = build_validation_prompt(
-        task, instruction_output, common_validation
+        task, instruction_output, common_validation, exploration_path=exploration_path
     )
     if stream:
         callback(f"\n{BOLD}{'-' * 60}{RESET}\n")
@@ -504,12 +526,14 @@ async def execute_task(
     skip_instruction: bool = False,
     existing_instruction_output: str | None = None,
     common_validation: list[str] | None = None,
+    exploration_path: str | None = None,
 ) -> TaskResult | StepResult:
     """Execute a single task with instruction and validation.
 
     Args:
         skip_instruction: If True, skip instruction phase and use existing_instruction_output
         existing_instruction_output: Pre-existing instruction output for resume from validation
+        exploration_path: Path to pre-collected exploration context file (optional)
 
     Returns:
         TaskResult on normal completion, StepResult if step mode stopped execution.
@@ -529,7 +553,13 @@ async def execute_task(
                 callback(f"{BOLD}{'=' * 60}{RESET}\n")
         else:
             result.instruction_output = await execute_instruction_phase(
-                task, config, task_number, total_tasks, attempt, previous_feedback
+                task,
+                config,
+                task_number,
+                total_tasks,
+                attempt,
+                previous_feedback,
+                exploration_path,
             )
             # Step mode: stop after instruction
             if config.step_mode and config._step_executed:
@@ -547,6 +577,7 @@ async def execute_task(
             total_tasks,
             result.instruction_output,
             common_validation,
+            exploration_path,
         )
         result.validation_output = validation_output
         result.validation_approved = approved
@@ -735,6 +766,7 @@ async def _execute_task_with_retries(
     history_manager: HistoryManager | None,
     resume_point: ResumePoint | None,
     common_validation: list[str] | None = None,
+    exploration_path: str | None = None,
 ) -> tuple[TaskResult | StepResult | None, str | None]:
     """Execute a single task with retry logic.
 
@@ -789,6 +821,7 @@ async def _execute_task_with_retries(
             skip_instruction=should_skip,
             existing_instruction_output=instruction_output if should_skip else None,
             common_validation=common_validation,
+            exploration_path=exploration_path,
         )
 
         # Handle StepResult (step mode stopped execution)
@@ -840,6 +873,7 @@ async def run_orchestrator(
     history_manager: HistoryManager | None = None,
     resume_point: ResumePoint | None = None,
     resume_history: ExecutionHistory | None = None,
+    exploration_path: str | None = None,
 ) -> OrchestratorResult:
     """Run the full task orchestrator with history tracking and resume support."""
     if config is None:
@@ -896,6 +930,7 @@ async def run_orchestrator(
             history_manager,
             resume_point,
             common_validation=task_definition.common_validation,
+            exploration_path=exploration_path,
         )
 
         if error_summary:

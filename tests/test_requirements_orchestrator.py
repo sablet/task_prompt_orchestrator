@@ -85,6 +85,22 @@ def make_single_verify_response(req_id: str, met: bool) -> str:
     return f'{{"requirement_id": "{req_id}", "met": {str(met).lower()}, "summary": "Verified", "criteria_results": [], "issues": []}}'
 
 
+def make_exploration_response() -> str:
+    """Create mock shared exploration response."""
+    return """### コードベース構造
+- CLI: scripts/main.py
+- Tests: tests/
+- Docs: doc/
+
+### 実行結果
+#### pytest tests/
+$ pytest tests/ -v
+All tests passed.
+
+### 生成されたアーティファクト
+None generated."""
+
+
 def make_mock_result(
     task_ids: list[str], success: bool = True, failed_ids: list[str] | None = None
 ) -> OrchestratorResult:
@@ -162,10 +178,11 @@ class TestRequirementsOrchestrator:
         """
         with tempfile.TemporaryDirectory() as temp_dir:
             # Scenario 1: All requirements already met at start
-            # Flow: pre-verify req_1 (met) -> pre-verify req_2 (met) -> Complete
+            # Flow: exploration -> pre-verify req_1 (met) -> pre-verify req_2 (met) -> Complete
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             with self._mock_claude_and_loopc(
                 [
+                    make_exploration_response(),  # Shared exploration
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", True),
                 ],
@@ -177,15 +194,18 @@ class TestRequirementsOrchestrator:
             assert result.completed_task_ids == []
 
             # Scenario 2: Some requirements unmet, then met after one iteration
-            # Flow: pre-verify (req_2 unmet) -> task_gen -> LoopC
-            #    -> iter2: pre-verify (all met) -> Complete
+            # Flow: exploration -> pre-verify (req_2 unmet) -> task_gen -> LoopC
+            #    -> iter2: exploration (new iter) -> pre-verify (all met) -> Complete
+            # Note: exploration is re-run each iteration
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             with self._mock_claude_and_loopc(
                 [
+                    make_exploration_response(),  # Iter 1: exploration
                     # Iter 1: pre-verification
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", False),  # Unmet
                     make_task_response("t1"),  # Task gen for req_2
+                    make_exploration_response(),  # Iter 2: exploration (new iteration)
                     # Iter 2: pre-verification
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", True),  # Now met
@@ -197,16 +217,19 @@ class TestRequirementsOrchestrator:
             assert "t1" in result.completed_task_ids
 
             # Scenario 3: Max iterations reached
-            # Flow: pre-verify (unmet) -> task -> LoopC -> pre-verify (still unmet) -> task -> LoopC -> fail
+            # Flow: exploration -> pre-verify (unmet) -> task -> LoopC
+            #    -> exploration (new iter) -> pre-verify (still unmet) -> task -> LoopC -> fail
             orchestrator = self._create_orchestrator(
                 sample_requirements, temp_dir, max_iter=2
             )
             with self._mock_claude_and_loopc(
                 [
+                    make_exploration_response(),  # Iter 1: exploration
                     # Iter 1
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", False),
                     make_task_response("t1"),
+                    make_exploration_response(),  # Iter 2: exploration (new iteration)
                     # Iter 2
                     make_single_verify_response("req_1", True),
                     make_single_verify_response("req_2", False),  # Still unmet
@@ -228,12 +251,15 @@ class TestRequirementsOrchestrator:
             orchestrator = self._create_orchestrator(sample_requirements, temp_dir)
             call_count = 0
 
-            async def mock_query(prompt, config, phase=None):
+            async def mock_query(prompt, config, phase=None, **kwargs):
                 nonlocal call_count
                 call_count += 1
-                if call_count <= 2:
+                if call_count == 1:
+                    # Shared exploration
+                    return make_exploration_response()
+                if call_count <= 3:
                     # Pre-verification: return unmet
-                    req_id = "req_1" if call_count == 1 else "req_2"
+                    req_id = "req_1" if call_count == 2 else "req_2"
                     return make_single_verify_response(req_id, False)
                 # Task generation: invalid yaml
                 return "invalid yaml"
@@ -270,10 +296,12 @@ class TestRequirementsOrchestrator:
         )
         with self._mock_claude_and_loopc(
             [
+                make_exploration_response(),  # Iter 1: exploration
                 # Iter 1: pre-verify (unmet) -> task_gen
                 make_single_verify_response("req_1", False),
                 make_single_verify_response("req_2", False),
                 make_task_response(),
+                make_exploration_response(),  # Iter 2: exploration (new iteration)
                 # Iter 2: pre-verify (all met) -> complete
                 make_single_verify_response("req_1", True),
                 make_single_verify_response("req_2", True),
@@ -291,12 +319,13 @@ class TestRequirementsOrchestrator:
         """Test Loop B behavior when Loop C fails or has partial failures."""
         with tempfile.TemporaryDirectory() as temp_dir:
             # Scenario 1: Loop C returns success=False (max retries reached)
-            # Flow: pre-verify (unmet) -> task_gen -> LoopC (fail) -> max iter
+            # Flow: exploration -> pre-verify (unmet) -> task_gen -> LoopC (fail) -> max iter
             orchestrator = self._create_orchestrator(
                 sample_requirements, temp_dir, max_iter=1
             )
             with self._mock_claude_and_loopc(
                 [
+                    make_exploration_response(),  # Shared exploration
                     # Pre-verification
                     make_single_verify_response("req_1", False),
                     make_single_verify_response("req_2", False),
@@ -318,6 +347,7 @@ class TestRequirementsOrchestrator:
                 "task_prompt_orchestrator.loopb_verification.run_claude_query",
                 new_callable=AsyncMock,
                 side_effect=[
+                    make_exploration_response(),  # Shared exploration
                     # Pre-verification
                     make_single_verify_response("req_1", False),
                     make_single_verify_response("req_2", False),
@@ -342,6 +372,7 @@ class TestRequirementsOrchestrator:
             )
             with self._mock_claude_and_loopc(
                 [
+                    make_exploration_response(),  # Shared exploration
                     # Pre-verification
                     make_single_verify_response("req_1", False),
                     make_single_verify_response("req_2", False),
@@ -548,7 +579,7 @@ class TestLoopBResumeFromInterruption:
             verification_call_count = 0
 
             async def mock_claude_query(
-                prompt: str, config: OrchestratorConfig, phase: str = ""
+                prompt: str, config: OrchestratorConfig, phase: str = "", **kwargs
             ) -> str:
                 nonlocal task_gen_call_count, verification_call_count
                 if phase == "task_generation":
@@ -660,7 +691,7 @@ class TestLoopBResumeFromInterruption:
             verification_call_count = 0
 
             async def mock_claude_query(
-                prompt: str, config: OrchestratorConfig, phase: str = ""
+                prompt: str, config: OrchestratorConfig, phase: str = "", **kwargs
             ) -> str:
                 nonlocal task_gen_call_count, verification_call_count
                 if phase == "task_generation":
@@ -1032,7 +1063,7 @@ class TestStepModeLoopB:
 
             call_count = 0
 
-            async def mock_query(prompt, cfg, phase=""):
+            async def mock_query(prompt, cfg, phase="", **kwargs):
                 nonlocal call_count
                 call_count += 1
                 # Set _step_executed like the real function does
@@ -1087,10 +1118,13 @@ class TestStepModeLoopB:
                 requirements_path=str(req_path),
             )
 
-            call_count = {"verification": 0, "task_gen": 0}
+            call_count = {"exploration": 0, "verification": 0, "task_gen": 0}
 
-            async def mock_claude_query(prompt, cfg, phase=""):
-                if phase == "verification":
+            async def mock_claude_query(prompt, cfg, phase="", **kwargs):
+                if phase == "exploration":
+                    call_count["exploration"] += 1
+                    return make_exploration_response()
+                elif phase == "verification":
                     call_count["verification"] += 1
                     req_id = "req_1" if call_count["verification"] == 1 else "req_2"
                     return make_single_verify_response(req_id, False)
@@ -1115,7 +1149,8 @@ class TestStepModeLoopB:
 
             # Should stop after task generation (StepModeStop raised)
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
-            # Pre-verification called for both reqs, task gen called once
+            # Exploration once, pre-verification called for both reqs, task gen called once
+            assert call_count["exploration"] == 1
             assert call_count["verification"] == 2
             assert call_count["task_gen"] == 1
 
@@ -1149,10 +1184,18 @@ class TestStepModeLoopB:
                 requirements_path=str(req_path),
             )
 
-            call_count = {"verification": 0, "task_gen": 0, "loop_c": 0}
+            call_count = {
+                "exploration": 0,
+                "verification": 0,
+                "task_gen": 0,
+                "loop_c": 0,
+            }
 
-            async def mock_claude_query(prompt, cfg, phase=""):
-                if phase == "verification":
+            async def mock_claude_query(prompt, cfg, phase="", **kwargs):
+                if phase == "exploration":
+                    call_count["exploration"] += 1
+                    return make_exploration_response()
+                elif phase == "verification":
                     call_count["verification"] += 1
                     req_id = "req_1" if call_count["verification"] == 1 else "req_2"
                     return make_single_verify_response(req_id, False)
@@ -1192,7 +1235,8 @@ class TestStepModeLoopB:
 
             # Should stop after Loop C returns step_stopped
             assert result.status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}
-            # Pre-verification for both reqs, task gen, and Loop C should have been called
+            # Exploration once, pre-verification for both reqs, task gen, and Loop C should have been called
+            assert call_count["exploration"] == 1
             assert call_count["verification"] == 2
             assert call_count["task_gen"] == 1
             assert call_count["loop_c"] == 1

@@ -1,4 +1,17 @@
 ## Validation for Task: {{ task_name }}
+{% if exploration_path %}
+
+### 事前調査結果（参照用）
+
+イテレーション開始時のコードベース調査結果が以下のファイルにあります。
+**注意**: この調査はイテレーション開始時点のものです。このタスクや前のタスクで実装された部分は調査結果と異なる可能性があります。
+
+```
+{{ exploration_path }}
+```
+
+---
+{% endif %}
 
 The following instruction was executed:
 {{ instruction }}
