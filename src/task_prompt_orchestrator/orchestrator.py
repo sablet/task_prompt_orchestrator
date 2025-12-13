@@ -221,6 +221,18 @@ class HistoryManager:
                 return h
         return None
 
+    def find_by_path(
+        self, yaml_path: str, include_completed: bool = True
+    ) -> list[ExecutionHistory]:
+        """Find all histories for a given YAML file path."""
+        resolved_path = str(Path(yaml_path).resolve())
+        histories = (
+            self.list_histories()
+            if include_completed
+            else self.list_incomplete_histories()
+        )
+        return [h for h in histories if h.yaml_path == resolved_path]
+
     def delete_history(self, history_id: str) -> bool:
         """Delete a history file."""
         file_path = self._history_file_path(history_id)

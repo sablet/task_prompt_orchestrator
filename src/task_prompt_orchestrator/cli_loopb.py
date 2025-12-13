@@ -1,6 +1,7 @@
 """CLI functions for Loop B (requirements orchestrator)."""
 
 import argparse
+import contextlib
 import json
 import logging
 from pathlib import Path
@@ -16,6 +17,7 @@ from .prompts import build_task_generation_prompt
 from .requirements_orchestrator import RequirementsOrchestrator
 from .schema import (
     LoopBExecutionHistory,
+    LoopBIteration,
     LoopBStatus,
     RequirementDefinition,
 )
@@ -138,59 +140,132 @@ def format_loopb_history_summary(history: LoopBExecutionHistory) -> str:
     )
 
 
+def _format_datetime(dt_str: str) -> str:
+    """Format ISO datetime string to readable format."""
+    try:
+        # Parse ISO format and return simplified format
+        return dt_str.replace("T", " ").split(".")[0]
+    except (ValueError, IndexError):
+        return dt_str
+
+
+def _format_iteration_timeline(
+    history: LoopBExecutionHistory, it: LoopBIteration, is_current: bool
+) -> list[str]:
+    """Format a single iteration in timeline format."""
+    lines = []
+    iteration_num = it.iteration_number
+    current_marker = " ← current" if is_current else ""
+
+    lines.append(f"▶ Iteration {iteration_num}{current_marker}")
+
+    # PRE-VERIFICATION
+    pre_verify_status = "✓" if it.verification_result else "..."
+    lines.append(f"  ├─ 🔎 PRE-VERIFICATION [{pre_verify_status}]")
+    if it.unmet_requirements:
+        unmet_str = ", ".join(it.unmet_requirements[:5])
+        if len(it.unmet_requirements) > 5:
+            unmet_str += f" (+{len(it.unmet_requirements) - 5} more)"
+        lines.append(f"  │    └─ Unmet: {unmet_str}")
+
+    # TASK GENERATION
+    if it.tasks_yaml_path:
+        task_file = Path(it.tasks_yaml_path).name
+        lines.append("  ├─ 📝 TASK GENERATION")
+        lines.append(f"  │    └─ {task_file}")
+    else:
+        lines.append("  ├─ 📝 TASK GENERATION [pending]")
+
+    # LOOP C EXECUTION
+    if it.loop_c_history_id:
+        lines.append("  ├─ 🔄 LOOP C EXECUTION")
+        lines.append(f"  │    └─ ID: {it.loop_c_history_id}")
+    elif is_current and history.status.value == "executing_tasks":
+        lines.append("  ├─ 🔄 LOOP C EXECUTION ← in progress")
+    else:
+        lines.append("  ├─ 🔄 LOOP C EXECUTION [pending]")
+
+    # POST-VERIFICATION
+    if it.verification_result:
+        all_met = it.verification_result.get("all_requirements_met", False)
+        post_status = "✅ ALL MET" if all_met else "❌ UNMET"
+        lines.append(f"  └─ 🔍 POST-VERIFICATION [{post_status}]")
+    else:
+        lines.append("  └─ 🔍 POST-VERIFICATION [pending]")
+
+    return lines
+
+
 def format_loopb_history_detail(history: LoopBExecutionHistory) -> str:
-    """Format a Loop B history entry with full details."""
+    """Format a Loop B history entry with timeline visualization."""
     status_icon = {
         LoopBStatus.COMPLETED: "✅",
         LoopBStatus.FAILED: "❌",
     }.get(history.status, "🔄")
 
+    # Shorten file path for display
+    req_path = history.requirements_path
+    with contextlib.suppress(ValueError):
+        req_path = str(Path(req_path).relative_to(Path.cwd()))
+
+    separator = "━" * 60
+
     lines = [
-        f"{status_icon} {history.history_id}",
-        "",
-        "Configuration:",
-        f"  Requirements: {history.requirements_path}",
-        f"  Tasks output: {history.tasks_output_dir}",
-        f"  Status:       {history.status.value}",
-        f"  Iterations:   {history.current_iteration}/{history.max_iterations}",
-        f"  Started:      {history.started_at}",
-        f"  Updated:      {history.updated_at}",
+        separator,
+        f"{status_icon} LOOP B: {history.history_id}",
+        separator,
+        f"  File:     {req_path}",
+        f"  Status:   {history.status.value}",
+        f"  Progress: Iteration {history.current_iteration + 1}/{history.max_iterations}",
+        f"  Started:  {_format_datetime(history.started_at)}",
+        f"  Updated:  {_format_datetime(history.updated_at)}",
     ]
 
     if history.error:
-        lines.append(f"  Error:        {history.error}")
+        lines.append(f"  Error:    {history.error}")
 
+    # Execution Timeline
     lines.append("")
-    lines.append("Iterations:")
+    lines.append("━━ Execution Timeline " + "━" * 38)
+    lines.append("")
+
     if history.iterations:
-        for it in history.iterations:
-            met = (
-                "✓"
-                if it.verification_result
-                and it.verification_result.get("all_requirements_met")
-                else "✗"
-            )
-            lines.append(f"  {it.iteration_number}. {met} tasks: {it.tasks_yaml_path}")
-            if it.loop_c_history_id:
-                lines.append(f"     Loop C: {it.loop_c_history_id}")
-            if it.unmet_requirements:
-                lines.append(f"     Unmet: {', '.join(it.unmet_requirements)}")
+        for i, it in enumerate(history.iterations):
+            is_current = i == len(history.iterations) - 1
+            lines.extend(_format_iteration_timeline(history, it, is_current))
+            lines.append("")
+    elif history.status.value in {
+        "verifying",
+        "pre_verifying",
+        "verifying_requirements",
+    }:
+        # Verification in progress
+        lines.append("▶ Iteration 1 ← current")
+        verify_idx = history.current_verification_index
+        partial = history.partial_verification_results or []
+        total = len(partial) + 1 if partial else "?"
+        lines.append(f"  └─ 🔎 PRE-VERIFICATION [{verify_idx}/{total}] ← in progress")
+        if partial:
+            met_count = sum(1 for r in partial if r.get("met"))
+            unmet_count = len(partial) - met_count
+            lines.append(f"       └─ Verified: {met_count} met, {unmet_count} unmet")
+    elif history.status.value == "generating_tasks":
+        lines.append("▶ Iteration 1 ← current")
+        lines.append("  ├─ 🔎 PRE-VERIFICATION [✓]")
+        lines.append("  └─ 📝 TASK GENERATION ← in progress")
+    elif history.status.value == "executing_tasks":
+        lines.append("▶ Iteration 1 ← current")
+        lines.append("  ├─ 🔎 PRE-VERIFICATION [✓]")
+        lines.append("  ├─ 📝 TASK GENERATION [✓]")
+        lines.append("  └─ 🔄 LOOP C EXECUTION ← in progress")
     else:
-        lines.append("  (none)")
+        lines.append("  (not started)")
 
-    if history.loop_c_history_ids:
-        lines.append("")
-        lines.append("Loop C histories:")
-        for hid in history.loop_c_history_ids:
-            lines.append(f"  - {hid}")
-
+    # Summary stats
     if history.completed_task_ids:
-        lines.append("")
-        lines.append(f"Completed tasks ({len(history.completed_task_ids)}):")
-        for tid in history.completed_task_ids[:10]:
-            lines.append(f"  - {tid}")
-        if len(history.completed_task_ids) > 10:
-            lines.append(f"  ... and {len(history.completed_task_ids) - 10} more")
+        lines.append(f"Completed tasks: {len(history.completed_task_ids)}")
+
+    lines.append(separator)
 
     return "\n".join(lines)
 
@@ -285,6 +360,48 @@ def handle_loopb_children(
     return 0
 
 
+def handle_loopb_history_by_file(
+    args: argparse.Namespace, history_manager: LoopBHistoryManager
+) -> int:
+    """Handle 'history --loopb <FILE>' subcommand."""
+    file_path = args.file
+    if not Path(file_path).exists():
+        logger.error(f"File not found: {file_path}")
+        return 1
+
+    histories = history_manager.find_by_path(file_path, include_completed=args.all)
+    if not histories:
+        msg = (
+            f"No Loop B history found for: {file_path}"
+            if args.all
+            else f"No incomplete Loop B history found for: {file_path}. Use --all to include completed."
+        )
+        print(msg)
+        return 0
+
+    if len(histories) == 1:
+        # Single match: show details
+        if args.json:
+            print(json.dumps(histories[0].to_dict(), indent=2, ensure_ascii=False))
+        else:
+            print(format_loopb_history_detail(histories[0]))
+            if histories[0].status not in {LoopBStatus.COMPLETED, LoopBStatus.FAILED}:
+                print()
+                print("To resume, use:")
+                print(f"  task-orchestrator resume {histories[0].history_id} --loopb")
+    elif args.json:
+        # Multiple matches: show list as JSON
+        print(
+            json.dumps([h.to_dict() for h in histories], indent=2, ensure_ascii=False)
+        )
+    else:
+        # Multiple matches: show list
+        print(f"Found {len(histories)} Loop B histories for: {file_path}")
+        for history in histories:
+            print(format_loopb_history_summary(history))
+    return 0
+
+
 def handle_loopb_history(
     args: argparse.Namespace, cwd: str, format_loopc_summary: Any
 ) -> int:
@@ -296,6 +413,9 @@ def handle_loopb_history(
         return handle_loopb_children(
             args, loopb_manager, loopc_manager, format_loopc_summary
         )
+
+    if args.file:
+        return handle_loopb_history_by_file(args, loopb_manager)
 
     if args.show:
         return handle_loopb_history_show(args, loopb_manager)

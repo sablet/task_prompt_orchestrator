@@ -9,11 +9,12 @@ from typing import Any
 
 import anyio
 
+from .cli_history import history_command
 from .cli_loopb import (
-    handle_loopb_history,
     output_loopb_result,
     run_loopb_orchestrator,
 )
+from .cli_plan import plan_command
 from .orchestrator import (
     HistoryManager,
     OrchestratorConfig,
@@ -188,6 +189,13 @@ Example usage:
     history_parser = subparsers.add_parser("history", help="List execution history")
     _add_loopb_flag(history_parser)
     history_parser.add_argument(
+        "file",
+        type=str,
+        nargs="?",
+        default=None,
+        help="File path to find history for (like run command)",
+    )
+    history_parser.add_argument(
         "--all",
         action="store_true",
         help="Show all history (including completed)",
@@ -331,86 +339,6 @@ def print_dry_run(task_def: TaskDefinition, config: OrchestratorConfig) -> None:
     print("=" * 70)
 
 
-def format_history_summary(history: ExecutionHistory) -> str:
-    """Format a history entry as one-line summary for list view."""
-    status_icon = "✅" if history.completed else "🔄"
-    completed = len(history.completed_task_ids)
-    total = len(history.task_results) + (
-        1
-        if history.current_task_id
-        and history.current_task_id not in history.completed_task_ids
-        else 0
-    )
-    total = max(total, completed)
-
-    current = ""
-    if history.current_task_id and not history.completed:
-        current = f" @ {history.current_task_id}_{history.current_phase or '?'}"
-
-    return f"{status_icon} {history.history_id}  [{completed}/{total}]{current}"
-
-
-def format_history_detail(history: ExecutionHistory) -> str:
-    """Format a history entry with full details."""
-    status = "completed" if history.completed else "incomplete"
-    status_icon = "✅" if history.completed else "🔄"
-
-    lines = [
-        f"{status_icon} {history.history_id}",
-        "",
-        "Configuration:",
-        f"  YAML:       {history.yaml_path}",
-        f"  Status:     {status}",
-        f"  Started:    {history.started_at}",
-        f"  Updated:    {history.updated_at}",
-    ]
-
-    if history.current_task_id:
-        lines.append(
-            f"  Current:    {history.current_task_id}_{history.current_phase or 'unknown'}"
-        )
-
-    if history.error:
-        lines.append(f"  Error:      {history.error}")
-
-    cfg = history.config_snapshot
-    if cfg:
-        lines.append("")
-        lines.append("Saved config:")
-        lines.append(f"  cwd:        {cfg.get('cwd', '(none)')}")
-        lines.append(f"  model:      {cfg.get('model', '(default)')}")
-        lines.append(
-            f"  retries:    {cfg.get('max_retries_per_task', 3)} per task, "
-            f"{cfg.get('max_total_retries', 10)} total"
-        )
-
-    lines.append("")
-    lines.append("Task results:")
-    if history.task_results:
-        for tr in history.task_results:
-            status_mark = "✓" if tr.status.value == "approved" else "✗"
-            error_info = (
-                f" - {tr.error[:50]}..."
-                if tr.error and len(tr.error) > 50
-                else (f" - {tr.error}" if tr.error else "")
-            )
-            lines.append(
-                f"  {status_mark} {tr.task_id}: {tr.status.value} "
-                f"(attempts: {tr.attempts}){error_info}"
-            )
-    else:
-        lines.append("  (none)")
-
-    resume_points = history.get_resume_points()
-    if resume_points and not history.completed:
-        lines.append("")
-        lines.append("Resume points:")
-        for point in resume_points:
-            lines.append(f"  - {point}")
-
-    return "\n".join(lines)
-
-
 def output_results(
     result: OrchestratorResult,
     output_path: str | None,
@@ -443,78 +371,6 @@ def output_results(
         logger.info(f"Results written to: {path}")
     else:
         print(json.dumps(result_dict, indent=2, ensure_ascii=False))
-
-
-# =============================================================================
-# History Command
-# =============================================================================
-
-
-def _history_show(
-    history_manager: HistoryManager, history_id: str, as_json: bool
-) -> int:
-    """Handle history show subcommand."""
-    try:
-        history = history_manager.load_history(history_id)
-    except FileNotFoundError:
-        logger.error(f"History not found: {history_id}")
-        return 1
-    if as_json:
-        print(json.dumps(history.to_dict(), indent=2, ensure_ascii=False))
-    else:
-        print(format_history_detail(history))
-        if not history.completed:
-            print()
-            print("To resume, use:")
-            print(f"  task-orchestrator resume {history.history_id}")
-    return 0
-
-
-def _history_list(
-    history_manager: HistoryManager, show_all: bool, as_json: bool
-) -> int:
-    """Handle history list subcommand."""
-    histories = (
-        history_manager.list_histories()
-        if show_all
-        else history_manager.list_incomplete_histories()
-    )
-    if not histories:
-        msg = (
-            "No execution history found."
-            if show_all
-            else "No incomplete executions found. Use --all to show completed ones."
-        )
-        print(msg)
-        return 0
-    if as_json:
-        print(
-            json.dumps([h.to_dict() for h in histories], indent=2, ensure_ascii=False)
-        )
-    else:
-        title = (
-            "All execution history:"
-            if show_all
-            else "Incomplete executions (resumable):"
-        )
-        print(title)
-        for history in histories:
-            print(format_history_summary(history))
-    return 0
-
-
-def history_command(args: argparse.Namespace) -> int:
-    """Execute the history command."""
-    cwd = args.cwd or str(Path.cwd())
-
-    if args.loopb or args.loopb_children:
-        return handle_loopb_history(args, cwd, format_history_summary)
-
-    history_manager = HistoryManager(cwd)
-
-    if args.show:
-        return _history_show(history_manager, args.show, args.json)
-    return _history_list(history_manager, args.all, args.json)
 
 
 # =============================================================================
@@ -740,99 +596,6 @@ async def resume_command(args: argparse.Namespace) -> int:
         return await resume_loopb(args)
 
     return await resume_loopc(args)
-
-
-# =============================================================================
-# Plan Command (Interactive Claude CLI)
-# =============================================================================
-
-
-def _load_plan_prompt(target: str) -> str:
-    """Load plan prompt from package templates."""
-    import importlib.resources
-
-    templates = importlib.resources.files("task_prompt_orchestrator") / "templates"
-    prompt_file = templates / f"plan_{target}.md"
-
-    # Read the template content
-    return prompt_file.read_text(encoding="utf-8")
-
-
-def _build_plan_initial_prompt(target: str, file_path: str | None) -> str:
-    """Build the initial prompt for the plan command."""
-    # Load base prompt from template
-    base_prompt = _load_plan_prompt(target)
-
-    # Remove frontmatter (YAML header)
-    if base_prompt.startswith("---"):
-        end_idx = base_prompt.find("---", 3)
-        if end_idx != -1:
-            base_prompt = base_prompt[end_idx + 3 :].strip()
-
-    # Add file context if specified
-    if file_path:
-        file_context = f"\n\n## 対象ファイル\n\n修正対象: `{file_path}`\n\nまずこのファイルを読み込んで内容を確認してください。"
-        return base_prompt + file_context
-
-    return (
-        base_prompt
-        + "\n\n## モード\n\n新規作成モードです。目的・背景をヒアリングしてください。"
-    )
-
-
-def _find_claude_cli() -> str | None:
-    """Find claude CLI path."""
-    import os
-    import shutil
-
-    # Check standard locations
-    claude_path = shutil.which("claude")
-    if claude_path:
-        return claude_path
-
-    # Check common installation paths
-    home = os.path.expanduser("~")
-    common_paths = [
-        os.path.join(home, ".claude", "local", "claude"),
-        os.path.join(home, ".claude", "local", "node_modules", ".bin", "claude"),
-        "/usr/local/bin/claude",
-    ]
-
-    for path in common_paths:
-        if os.path.isfile(path) and os.access(path, os.X_OK):
-            return path
-
-    return None
-
-
-def plan_command(args: argparse.Namespace) -> int:
-    """Execute the plan command (launches claude CLI in interactive mode)."""
-    import subprocess
-
-    # Find claude CLI
-    claude_path = _find_claude_cli()
-    if not claude_path:
-        logger.error("claude CLI not found. Please install Claude Code first.")
-        logger.error("See: https://claude.ai/code")
-        return 1
-
-    # Build initial prompt
-    initial_prompt = _build_plan_initial_prompt(args.target, args.file)
-
-    logger.info(f"Launching interactive planning session for {args.target}...")
-    if args.file:
-        logger.info(f"Target file: {args.file}")
-
-    # Launch claude CLI in interactive mode with acceptEdits permission mode
-    try:
-        result = subprocess.run(
-            [claude_path, "--permission-mode", "acceptEdits", initial_prompt],
-            check=False,
-        )
-        return result.returncode
-    except KeyboardInterrupt:
-        logger.info("Planning session interrupted.")
-        return 0
 
 
 # =============================================================================

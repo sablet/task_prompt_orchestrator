@@ -148,6 +148,18 @@ class LoopBHistoryManager:
                 return h
         return None
 
+    def find_by_path(
+        self, requirements_path: str, include_completed: bool = True
+    ) -> list[LoopBExecutionHistory]:
+        """Find all histories for a given requirements file path."""
+        resolved_path = str(Path(requirements_path).resolve())
+        histories = (
+            self.list_histories()
+            if include_completed
+            else self.list_incomplete_histories()
+        )
+        return [h for h in histories if h.requirements_path == resolved_path]
+
     def delete_history(self, history_id: str) -> bool:
         """Delete a history file."""
         return delete_history_file(self.history_dir, history_id)
